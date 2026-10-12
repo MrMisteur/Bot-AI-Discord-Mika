@@ -1,0 +1,20 @@
+# --- Obligatoire ---
+DISCORD_TOKEN=
+AI_API_KEY=
+
+# --- IA (par défaut : Groq, gratuit) ---
+AI_BASE_URL=
+AI_MODEL=
+
+# --- Personnalité & comportement ---
+BOT_NAME=
+REACT_CHANCE=
+SPONTANEOUS_CHANCE=
+DROP_CHANCE=
+HISTORY_SIZE=
+
+# --- Technique ---
+DB_PATH=bot.db
+# Les commandes se resynchronisent toutes seules quand tu en modifies.
+# Mets 1 une fois pour forcer une synchro, puis remets 0 (ou utilise /sync).
+SYNC_ON_START=1
