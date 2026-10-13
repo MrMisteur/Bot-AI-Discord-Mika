@@ -1,330 +1,257 @@
-# 🖤 Mika — Bot Discord IA « e-girl dominatrice »
+# 🖤 Mika — Bot Discord IA
 
-Mika est un bot Discord en français pour serveurs entre potes. Elle discute grâce à une IA (n'importe quel service compatible OpenAI), vanne, flirte (jamais de contenu explicite), joue avec vous, gère la modération et retient le fil de la discussion dans une base SQLite.
+Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». Il discute par mention, réponse ou prénom, propose des jeux, de la modération, de l'économie, des tickets, des Kahoot et plus encore. Tout tient dans un seul fichier : `bot.py`.
 
-> **Python 3.10+ requis** • discord.py **2.4+** • aucune base externe à installer.
+## Sommaire
 
----
+- [Fonctionnalités](#fonctionnalités)
+- [Prérequis](#prérequis)
+- [Installation](#installation)
+- [Configuration (`.env`)](#configuration-env)
+- [Permissions et intents Discord](#permissions-et-intents-discord)
+- [Commandes](#commandes)
+- [Logs](#logs)
+- [Données et sauvegarde](#données-et-sauvegarde)
+- [Dépannage](#dépannage)
+- [Crédits](#Crédits)
 
-## ✨ Fonctionnalités
+## Fonctionnalités
 
-| Catégorie | Contenu |
-|---|---|
-| 💬 **Chat IA** | Répond quand on la mentionne, quand on répond à un de ses messages, ou quand on écrit son prénom (« Mika, t'en penses quoi ? »). Réponses courtes (1 à 3 phrases), mémoire par salon. |
-| 🎭 **Styles** | 4 personnalités au choix par serveur : Dominatrice (défaut), Mommy, Douce, Sarcastique. |
-| 🔎 **Recherche web** | `/recherche` (liens) et `/ask web:True` (l'IA s'appuie sur DuckDuckGo). Déclenchement automatique sur des mots comme « actu », « prix », « score »… |
-| 🌤️ **Météo** | Vraies données Open-Meteo (sans clé). `/meteo Lyon` ou simplement « météo Lyon » dans le chat. |
-| 😈 **Taquineries** | `/roast`, `/blague`, `/8ball`, `/choisir`, `/ship`. |
-| 💋 **Actions sociales** | `/kiss` `/hug` `/pat` `/slap` `/bonk` `/gift`. Variantes plus osées uniquement dans les salons NSFW. |
-| 💍 **Mariage** | `/marie`, `/mariage`, `/divorce` — jusqu'à 3 personnes par mariage, tout le monde doit accepter. |
-| 🎮 **Mini-jeux** | `/pfc`, `/quiz` (généré par l'IA), `/blackjack` (solo ou jusqu'à 5), `/poker` Texas Hold'em (jusqu'à 6 joueurs, Mika joue aussi). |
-| 🏆 **Stats** | `/classement` et `/stat` : victoires, défaites, K/D, points, top %. |
-| 🛠️ **Commandes perso** | Créées par les admins, utilisables en `/cc nom` ou `!nom`. Variables `{user}` et `{server}`. |
-| 🔨 **Modération** | Panel de punitions : mute, unmute, avertir, expulser, bannir, nettoyer, mute vocal, casque, donner/retirer un rôle, deban. |
-| 📜 **Logs** | Toutes les sanctions **et** toutes les commandes du bot sont tracées dans un salon de logs. |
-| 🎭 **Rôles à boutons** | `/rolereaction` — panneaux persistants, même après redémarrage. |
-| 🛡️ **Mode protectrice** | Si quelqu'un semble aller mal, Mika devient douce. En cas de détresse grave, elle ajoute le 3114 (France) et le 112. |
+- **Chat IA** : répond aux mentions, aux réponses à ses messages et quand on écrit son prénom ; rebonds spontanés et réactions emoji aléatoires ; mémoire par salon (SQLite).
+- **Social** : mariage (jusqu'à 3 par mariage), compatibilité, roast, blagues, 8ball.
+- **Jeux** : pierre-feuille-ciseaux (et duel), quiz, blackjack et poker multi-joueurs, quiz créés par les membres, **Kahoot** (quiz live multi-joueurs, créés à la main ou par l'IA), classements et stats.
+- **Économie** : solde, bonus quotidien, dons, classement des plus riches, mises sur les jeux.
+- **Modération** : panel de punitions, auto-modération, mots interdits, mute vocal, purge, silence.
+- **Logs filtrables par type** : sanctions, commandes, rôles, auto-modération, tickets, actions admin, arrivées, messages, vocal.
+- **Tickets** d'assistance avec panneau à bouton et transcripts.
+- **Accueil** personnalisé (messages écrits à la main ou générés par l'IA).
+- **Outils** : sondages à boutons, annonces, panneau de rôles-réactions, commandes personnalisées (`/cc`, `!nom`), météo, recherche web.
+- **IA pour les admins** : `/creeserveur` (génère rôles, salons et permissions), `/dev projet` (génère un site ou une app en zip), `/optimiser` (analyse des performances).
+- **Panneau d'administration complet** : `/adminpanel`.
 
----
+## Prérequis
 
-## 🚀 Installation
+- Python **3.10 ou plus**
+- Un bot Discord (token) créé sur le [Developer Portal](https://discord.com/developers/applications)
+- Une clé API pour un service compatible OpenAI (par défaut : [Groq](https://console.groq.com), gratuit)
 
-### 1. Récupérer le code
+Dépendances Python utilisées par `bot.py` :
 
-```bash
-git clone <ton-repo>
-cd <ton-repo>
-python -m venv .venv
-source .venv/bin/activate        # Windows : .venv\Scripts\activate
 ```
-
-### 2. Installer les dépendances
-
-Crée un fichier `requirements.txt` :
-
-```text
-discord.py>=2.4
+discord.py
 aiosqlite
 httpx
-openai>=1.0
+openai
 ddgs
 python-dotenv
 ```
 
-puis :
+## Installation
 
 ```bash
-pip install -r requirements.txt
-```
+# 1. Récupérer le projet
+git clone <ton-repo> && cd <ton-repo>
 
-### 3. Configurer le `.env`
+# 2. (Recommandé) environnement virtuel
+python -m venv .venv
+source .venv/bin/activate        # Windows : .venv\Scripts\activate
 
-Crée un fichier `.env` à la racine (voir [Configuration](#️-configuration)) :
+# 3. Installer les dépendances
+pip install discord.py aiosqlite httpx openai ddgs python-dotenv
 
-```env
-DISCORD_TOKEN=ton_token_discord
-AI_API_KEY=ta_cle_api_ia
-```
+# 4. Créer le fichier de configuration
+cp .env.example .env             # puis édite-le (voir ci-dessous)
 
-### 4. Lancer
-
-```bash
+# 5. Lancer
 python bot.py
 ```
 
-*(remplace `bot.py` par le nom réel de ton fichier)*
+Au premier démarrage, les commandes slash se synchronisent automatiquement. Elles ne sont resynchronisées ensuite que si la liste des commandes change.
 
-Au premier démarrage, les commandes slash sont synchronisées automatiquement. Elles peuvent mettre quelques minutes à apparaître sur Discord.
+## Configuration (`.env`)
 
----
+### Obligatoires
 
-## 🔧 Créer l'application Discord
+| Variable | Description |
+| --- | --- |
+| `DISCORD_TOKEN` | Token du bot Discord |
+| `AI_API_KEY` | Clé API du service d'IA |
 
-1. Va sur le [Developer Portal](https://discord.com/developers/applications) → **New Application**.
-2. Onglet **Bot** → **Reset Token** → copie le token dans `DISCORD_TOKEN`.
-3. Toujours dans **Bot**, active les trois **Privileged Gateway Intents** :
-   - ✅ **Presence Intent** (pour `/statu`)
-   - ✅ **Server Members Intent** (pour le vocal, les rôles, la modération)
-   - ✅ **Message Content Intent** (indispensable pour le chat)
-4. Onglet **OAuth2 → URL Generator** : coche les scopes `bot` et `applications.commands`, puis les permissions ci-dessous, et ouvre l'URL générée pour inviter le bot.
-
-### Permissions recommandées
-
-| Usage | Permission |
-|---|---|
-| Base | Voir les salons, Envoyer des messages, Intégrer des liens, Ajouter des réactions, Lire l'historique, Utiliser les emojis externes |
-| Modération | Exclure temporairement des membres, Expulser, Bannir, Gérer les messages |
-| Vocal | Rendre muets les membres, Mettre en sourdine les membres |
-| Rôles | Gérer les rôles |
-| `/envoyer` | Gérer les webhooks |
-| `/emoji ajouter` | Gérer les expressions |
-
-> ⚠️ **Hiérarchie des rôles** : le rôle de Mika doit être **au-dessus** des rôles qu'elle doit attribuer ou des membres qu'elle doit sanctionner.
-
----
-
-## ⚙️ Configuration
-
-Toutes les variables se règlent dans le `.env`.
+### Optionnelles
 
 | Variable | Défaut | Description |
-|---|---|---|
-| `DISCORD_TOKEN` | — | **Obligatoire.** Token du bot. |
-| `AI_API_KEY` | — | **Obligatoire.** Clé API du fournisseur d'IA. |
-| `AI_BASE_URL` | `https://api.groq.com/openai/v1` | Endpoint compatible OpenAI. |
-| `AI_MODEL` | `openai/gpt-oss-120b` | Modèle utilisé. |
-| `BOT_NAME` | `Mika` | Prénom du bot (sert aussi de déclencheur). |
-| `DB_PATH` | `bot.db` | Chemin de la base SQLite. |
-| `HISTORY_SIZE` | `12` | Nombre de messages de contexte envoyés à l'IA. |
-| `REACT_CHANCE` | `0.05` | Probabilité d'une réaction emoji choisie par l'IA. |
-| `SPONTANEOUS_CHANCE` | `0.03` | Probabilité de rebondir sans être appelée (si activé). |
-| `PHRASE_CHANCE` | `0.60` | Probabilité d'une phrase « mommy » sur câlin / bisou en chat. |
-| `NAME_TRIGGER` | `1` | `1` = répond aussi quand on écrit son prénom, `0` = non. |
-| `SYNC_ON_START` | — | Mets `1` pour forcer la resynchronisation des commandes au démarrage. |
+| --- | --- | --- |
+| `AI_BASE_URL` | `https://api.groq.com/openai/v1` | Adresse de l'API (tout service « OpenAI-compatible ») |
+| `AI_MODEL` | `openai/gpt-oss-120b` | Modèle utilisé |
+| `BOT_NAME` | `Mika` | Prénom du bot (déclenche aussi ses réponses) |
+| `DB_PATH` | `bot.db` | Chemin de la base SQLite |
+| `HISTORY_SIZE` | `12` | Nombre de messages de contexte envoyés à l'IA |
+| `REACT_CHANCE` | `0.05` | Probabilité d'une réaction emoji spontanée |
+| `SPONTANEOUS_CHANCE` | `0.03` | Probabilité de rebondir sans être appelé |
+| `PHRASE_CHANCE` | `0.60` | Probabilité d'une phrase « mommy » sur câlin/bisou |
+| `NAME_TRIGGER` | `1` | `1` : répond aussi quand on écrit son prénom ; `0` : désactivé |
+| `DEV_MAX_TOKENS` | `8000` | Taille max de sortie de `/dev projet` (à baisser si ton modèle limite) |
+| `SYNC_ON_START` | *(vide)* | `1` : force la resynchronisation des commandes à chaque démarrage |
 
-### Changer de fournisseur d'IA
-
-Tout service « OpenAI-compatible » fonctionne. Exemples :
+Exemple minimal :
 
 ```env
-# Groq (défaut, gratuit)
-AI_BASE_URL=https://api.groq.com/openai/v1
-AI_MODEL=openai/gpt-oss-120b
-
-# OpenAI
-AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=gpt-4o-mini
-
-# Ollama en local
-AI_BASE_URL=http://localhost:11434/v1
-AI_API_KEY=ollama
-AI_MODEL=llama3.1
+DISCORD_TOKEN=ton_token_discord
+AI_API_KEY=ta_cle_api
 ```
 
-> Le mode JSON (utilisé par `/quiz`) doit être supporté par le modèle choisi. Utilise `/test` pour vérifier.
+## Permissions et intents Discord
 
----
+Dans le **Developer Portal → Bot → Privileged Gateway Intents**, active :
 
-## 📚 Commandes
+- **Message Content Intent**
+- **Server Members Intent**
+- **Presence Intent**
 
-### 👥 Pour tout le monde
+Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. Donne-lui les permissions dont tu as besoin selon les fonctions utilisées : gérer les rôles, gérer les salons, gérer les messages, expulser / bannir, exclure des membres (mute), gérer les emojis, voir les salons, envoyer des messages, intégrer des liens, ajouter des réactions, utiliser les emojis externes. Le plus simple est de lui donner **Administrateur** sur un serveur de confiance.
 
-**Discussion & IA**
-- `/ask question [detail] [web]` — pose une question (réponse courte, détaillée, ou avec recherche web)
-- `/recherche requete` — résultats web avec liens
-- `/roast @membre [contexte]` — Mika chambre quelqu'un
-- `/blague [theme]` — blague coquine (sous-entendus, jamais explicite)
-- `/reset` — efface la mémoire du salon
+> Le rôle du bot doit être placé **au-dessus** des rôles qu'il doit gérer ou sanctionner.
 
-**Décisions & fun**
-- `/8ball question` — oui / non / peut-être
-- `/choisir options` — ex : `pizza, tacos ou burger`
-- `/ship @a @b` — compatibilité (stable pour un même duo)
+## Commandes
 
-**Actions**
-- `/kiss` `/hug` `/pat` `/slap` `/bonk` `/gift` + `@membre`
-- Essaie-les sur Mika elle-même 😏
+Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche tout ce que le bot sait faire, `/aideadmin` la partie réservée aux admins.
 
-**Mariage**
-- `/marie @membre [@membre2]` — demande (3 personnes max, tout le monde accepte)
-- `/mariage [@membre]` — voir un mariage
-- `/divorce confirmer:True` — quitter son mariage
+### 💬 IA et discussion
 
-**Jeux & stats**
-- `/pfc` — pierre-feuille-ciseaux
-- `/quiz [theme]` — premier qui trouve gagne (30 s)
-- `/blackjack` — solo ou table jusqu'à 5 joueurs
-- `/poker` — Texas Hold'em jusqu'à 6 joueurs, sans mises
-- `/classement [jeu]` — top 10 du serveur
-- `/stat [joueur]` — stats détaillées par jeu
+| Commande | Description |
+| --- | --- |
+| `/ask` | Pose une question |
+| `/recherche` | Recherche sur le web et donne des liens |
+| `/roast` | Chambre quelqu'un |
+| `/blague` | Blague coquine (sous-entendus, jamais explicite) |
+| `/8ball` | Réponse à une question fermée |
+| `/choisir` | Tranche entre plusieurs options |
+| `/meteo` | Météo d'une ville |
+| `/reset` | Efface la mémoire du salon |
 
-*Barème : victoire 10 pts • égalité 3 pts • participation 1 pt.*
+### 💍 Social
 
-**Divers**
-- `/meteo ville` — météo actuelle + 3 jours
-- `/ping` — latence websocket et API
-- `/statu @membre` — statut, activité, appareils, vocal
-- `/emoji agrandir` — affiche un emoji personnalisé en grand
-- `/cc nom` ou `!nom` — commande personnalisée du serveur
-- `/aide` — le mode d'emploi
+| Commande | Description |
+| --- | --- |
+| `/marie`, `/mariage`, `/divorce` | Mariage (jusqu'à 3 personnes) |
+| `/ship` | Compatibilité entre deux personnes |
+| `/statu` | Profil d'un membre : statut, stats de jeu, argent |
 
-**Dans le chat (sans commande)**
-- « coucou », « ça va ? », « tu fais quoi ? », « bonne nuit » → réponses instantanées, sans IA
-- « météo Lyon » → météo directe
-- « câlin », « bisou »… → phrases « mommy » aléatoires
+### 🎮 Jeux
 
-### 🛡️ Staff & admins
+| Commande | Description |
+| --- | --- |
+| `/jeux` | Panel regroupant tous les jeux |
+| `/pfc`, `/pfcduel` | Pierre-feuille-ciseaux (contre le bot ou en duel, mise possible) |
+| `/quiz` | Quiz rapide : le premier qui trouve gagne |
+| `/blackjack`, `/regleblackjack` | Blackjack, seul ou à plusieurs, et ses règles |
+| `/poker`, `/reglepoker`, `/main` | Texas Hold'em, ses règles, classement des mains |
+| `/classement`, `/stat` | Classement du serveur et stats individuelles (victoires, défaites, K/D) |
+| `/quizperso creer\|jouer\|liste\|supprimer` | Quiz créés par les membres |
+| `/kahoot creer\|generer\|lancer\|liste\|supprimer` | Kahoot (quiz live multi-joueurs), à la main ou par l'IA |
 
-| Commande | Permission | Rôle |
-|---|---|---|
-| `/adminpanel` | Administrateur | Panel regroupant presque tout, en boutons |
-| `/aideadmin` | Administrateur | Liste des commandes admin |
-| `/punition panel @membre` | Staff (au moins une perm. de modération) | Panel complet de sanctions |
-| `/punition deban` | Bannir des membres | Débannir (autocomplétion des bannis) |
-| `/config` | Gérer le serveur | Réactions, rebonds spontanés, salutations, réponse au prénom |
-| `/style` | Gérer le serveur | Change la personnalité |
-| `/logs [salon] [desactiver]` | Gérer le serveur | Salon de logs |
-| `/silence durée` | Gérer le serveur | Mika se tait (`10`, `30m`, `2h`, `1j`, ou `off`) |
-| `/test` | Gérer le serveur | Auto-diagnostic complet |
-| `/commande ajouter\|modifier\|supprimer\|liste` | Administrateur | Commandes perso |
-| `/rolereaction` | Gérer les rôles | Panneau de rôles à boutons |
-| `/envoyer` | Administrateur | Message anonyme ou sous pseudo perso (tracé dans les logs) |
-| `/emoji ajouter` | Gérer les expressions | Ajoute un emoji au serveur |
-| `/sync` | Owner du bot | Resynchroniser les commandes |
+### 🪙 Économie
 
-### 🔨 Panel de punitions
+| Commande | Description |
+| --- | --- |
+| `/solde` | Ton porte-monnaie |
+| `/daily` | Bonus quotidien |
+| `/donner` | Donne des pièces |
+| `/richesse` | Les plus riches du serveur |
+| `/ecopanel` *(admin)* | Panneau de l'économie et des mises |
+| `/eco config\|donner\|retirer\|reset` *(admin)* | Réglages et gestion des soldes |
 
-Ouvert par `/punition panel @membre`, il propose :
+### 🔨 Modération
 
-- 🤐 **Mute rapide** (5 min → 1 semaine) ou **mute perso** — timeout Discord, 28 jours max
-- ⚠️ **Avertir** • 🔊 **Unmute**
-- 👢 **Expulser** • 🔨 **Bannir** • 🧹 **Nettoyer** (1 à 100 messages du membre)
-- 🎙️ **Mute voc** • 🎧 **Casque** • 🔊 **Libérer voc** — avec durée optionnelle, levée automatique
-- 🎀 **Donner un rôle** • ✂️ **Retirer un rôle**
+| Commande | Description |
+| --- | --- |
+| `/punition panel` | Panel de punitions du staff |
+| `/punition deban` | Débannit quelqu'un (avec log) |
+| `/automod config\|mot\|pardon\|statut` *(admin)* | Auto-modération et mots interdits |
+| `/purge` *(staff)* | Supprime un nombre de messages |
+| `/silence` *(staff)* | Le bot se tait un moment (`off` pour annuler) |
+| `/logs` *(admin)* | Définit le salon des logs |
 
-Chaque sanction est annoncée dans le salon (ton « Mommy ») **et** enregistrée dans le salon de logs. Le bot refuse de sanctionner le propriétaire, lui-même, ou quelqu'un de plus haut que le modérateur dans la hiérarchie.
+### 🎫 Tickets
 
-### 📜 Ce qui est logué
+| Commande | Description |
+| --- | --- |
+| `/ticket config` *(staff)* | Règle le système |
+| `/ticket panel` *(staff)* | Poste le panneau « Ouvrir un ticket » |
+| `/ticket fermer` | Ferme le ticket (transcript sauvegardé) |
+| `/ticket ajouter` / `retirer` *(staff)* | Ajoute ou retire un membre du ticket |
 
-- Toutes les sanctions (mute, unmute, warn, kick, ban, deban, purge, vocal, rôles)
-- Fin automatique des sanctions vocales
-- Toutes les commandes slash (avec leurs options), les actions du panel admin et les `!commandes` perso
-- Les tentatives refusées (permissions manquantes) et les erreurs
-- Les rôles pris / retirés via un panneau `/rolereaction`
-- Chaque usage de `/envoyer` (l'anonymat vaut pour les membres, pas pour le staff)
+### 👋 Accueil, annonces, sondages
 
-Pour l'activer : `/logs salon:#ton-salon`.
+| Commande | Description |
+| --- | --- |
+| `/bienvenue config\|generer\|tester` | Messages d'accueil personnalisés, générés par l'IA, aperçu privé |
+| `/sondage` | Sondage interactif à boutons |
+| `/annonce` *(staff)* | Publie une annonce dans un salon |
+| `/rolereaction` *(admin)* | Panneau pour choisir ses rôles |
 
----
+### 🛠️ Commandes personnalisées
 
-## 🎭 Personnalisation
+| Commande | Description |
+| --- | --- |
+| `/commande ajouter\|modifier\|supprimer\|liste` *(admin)* | Gère les commandes du serveur |
+| `/cc` | Lance une commande personnalisée |
+| `!nom` | Raccourci pour lancer une commande personnalisée |
 
-### Le caractère
+### 🏗️ Serveur et outils admin
 
-Tout se règle dans le fichier, section **PERSONNALITÉ** :
+| Commande | Description |
+| --- | --- |
+| `/adminpanel` *(admin)* | Panneau de configuration complet : fonctionnalités, modération, logs par type, économie, accueil, outils. Options : `page` (section à ouvrir), `reactions`, `spontane`, `salutations`, `nom` (activer / couper directement) |
+| `/style` *(admin)* | Change la personnalité du bot sur ce serveur |
+| `/envoyer` *(admin)* | Message anonyme ou sous un pseudo perso |
+| `/creeserveur` *(admin)* | L'IA génère un serveur complet : rôles, salons, permissions |
+| `/creersalon`, `/supprimersalon` *(staff)* | Crée ou supprime un salon / une catégorie |
+| `/role creer\|supprimer` *(staff)* | Crée ou supprime un rôle |
+| `/emoji agrandir\|ajouter` | Affiche un emoji en grand / l'ajoute au serveur *(admin)* |
+| `/dev projet\|question` | L'IA génère un site ou une app (zip) / répond à une question de dev |
+| `/optimiser` *(admin)* | Analyse les performances et propose des améliorations |
+| `/info` | Stats du serveur |
+| `/ping` | Latence du bot |
+| `/test` *(admin)* | Vérifie que tout fonctionne |
+| `/sync` *(owner)* | Resynchronise les commandes |
 
-- `PERSONA` — le prompt de base (ton, limites, longueur)
-- `TONE_SOFT` / `TONE_SPICY` — ajustement selon que le salon est normal ou NSFW
-- `STYLES` — les 4 styles sélectionnables avec `/style`
-- `MOMMY_SOFT` / `MOMMY_SPICY`, `GREET_*`, `ACTIONS` — les phrases prêtes à l'emploi
-- `FOOTERS` et `COLOR_*` — la charte graphique des embeds
+## Logs
 
-### Garde-fous intégrés
+Définis le salon avec `/logs`, puis choisis les types à enregistrer dans `/adminpanel`.
 
-Ils sont codés dans le prompt et ne dépendent pas du style choisi :
+| Type | Contenu | Par défaut |
+| --- | --- | --- |
+| 🔨 Sanctions | mute, kick, ban, avertissement, vocal | activé |
+| 📋 Commandes | slash, panels, `!nom` | activé |
+| 🎭 Rôles | donnés, retirés, créés, supprimés, panneaux | activé |
+| 🛡️ Auto-modération | infractions et sanctions auto | activé |
+| 🎫 Tickets | ouverture, fermeture, transcripts | activé |
+| 🛠️ Actions admin | envoyer, salons, serveur IA | activé |
+| 👋 Arrivées et départs | membres qui rejoignent / partent | désactivé |
+| 💬 Messages | supprimés / modifiés | désactivé |
+| 🎙️ Vocal | connexion, départ, déplacement | désactivé |
 
-- Aucun contenu sexuel explicite
-- Si quelqu'un se dit mineur ou parle de collège / lycée, plus aucun sous-entendu
-- Aucun propos haineux
-- Mode protectrice automatique quand quelqu'un semble aller mal
-- L'IA n'invente jamais d'URL
+Les logs de tickets peuvent aussi avoir un salon dédié (`/ticket config`) ; à défaut, ils vont dans le salon de logs général.
 
-### Salons NSFW
+## Données et sauvegarde
 
-Dans un salon marqué NSFW, Mika est un peu plus osée (phrases « spicy », ton `TONE_SPICY`). Elle reste non explicite.
+Tout est stocké dans un fichier SQLite (`bot.db` par défaut, modifiable via `DB_PATH`) : mémoire des salons, économie, stats de jeu, quiz, Kahoot, paramètres par serveur, etc. Les tables sont créées automatiquement.
 
----
+Pour sauvegarder : arrête le bot et copie `bot.db` (ainsi que les éventuels fichiers `bot.db-wal` et `bot.db-shm`).
 
-## 🧠 Fonctionnement interne
+Les boutons de rôles, sondages et tickets restent actifs après un redémarrage.
 
-- **Mémoire** : les 40 derniers messages de chaque salon sont conservés ; `HISTORY_SIZE` d'entre eux sont envoyés à l'IA.
-- **Base SQLite** (`bot.db`) : historique, réglages, commandes perso, mariages, stats de jeu, minuteurs vocaux.
-- **Synchronisation des commandes** : le bot calcule une empreinte de ses commandes et ne resynchronise que si elle change (économise les limites d'API Discord).
-- **Anti-spam** : cooldown de 8 s par utilisateur sur les commandes IA, 3 s sur le chat, 5 s sur la météo.
-- **Pings** : le bot ne ping jamais `@everyone` ni les rôles ; les pings utilisateurs sont autorisés uniquement quand c'est voulu.
-- **Persistance** : les boutons de `/rolereaction` restent actifs après un redémarrage.
+## Dépannage
 
----
-
-## 🧪 Vérifier que tout marche
-
-Lance **`/test`** (permission « Gérer le serveur »). Il contrôle : base de données, IA texte et JSON, recherche web, salutations, actions, modération, blackjack, poker, stats, commandes perso, météo, commandes enregistrées, salon de logs, permissions et intents. Chaque ligne est ✅, ⚠️ ou ❌.
-
----
-
-## 🩺 Dépannage
-
-| Problème | Solution |
-|---|---|
-| Le bot ne répond pas aux messages | Active **Message Content Intent** dans le Developer Portal. |
-| Les commandes slash n'apparaissent pas | Attends quelques minutes, ou lance `/sync` (owner), ou `SYNC_ON_START=1`. |
-| « Mon rôle n'est pas assez haut » | Monte le rôle de Mika au-dessus des rôles / membres ciblés. |
-| `/statu` donne un statut faux | Active **Presence Intent** et **Server Members Intent**. |
-| Mute vocal impossible | Le membre doit être en vocal ; Mika a besoin de « Rendre muets » / « Mettre en sourdine ». |
-| `/envoyer` avec pseudo perso refusé | Donne-lui « Gérer les webhooks » dans le salon. |
-| « J'ai trop parlé » | Limite de requêtes de ton fournisseur d'IA atteinte : attends ou change de modèle. |
-| `/quiz` échoue | Ton modèle ne gère pas bien le JSON ; essaie un autre modèle. |
-| Pas de logs | Définis un salon avec `/logs` et donne à Mika « Envoyer des messages » + « Intégrer des liens ». |
-| `/recherche` échoue | DuckDuckGo limite parfois les requêtes ; réessaie plus tard. |
-| Impossible de joindre le service météo | Open-Meteo est temporairement indisponible ou ton hébergeur bloque la sortie réseau. |
-
----
-
-## 📁 Structure
-
-```text
-.
-├── bot.py            # tout le bot (un seul fichier)
-├── bot.db            # base SQLite (créée automatiquement)
-├── .env              # configuration (ne jamais committer)
-├── .env.example      # modèle de configuration
-└── requirements.txt
-```
-
-Ajoute ceci à ton `.gitignore` :
-
-```text
-.env
-bot.db
-.venv/
-__pycache__/
-```
-
-> 🔐 **Ne partage jamais** ton `DISCORD_TOKEN` ni ta clé `AI_API_KEY`. Si l'un d'eux fuite, régénère-le immédiatement.
-
----
-
-## 🙏 Crédits
+- **Le bot ne répond pas aux messages** : vérifie que le *Message Content Intent* est activé dans le Developer Portal.
+- **Il ne démarre pas** : `DISCORD_TOKEN` et `AI_API_KEY` doivent être définis dans `.env`.
+- **Les commandes n'apparaissent pas** : redémarre le bot, lance `/sync` (owner) ou mets `SYNC_ON_START=1` une fois. La propagation côté Discord peut prendre quelques minutes.
+- **Il ne peut pas sanctionner ou gérer un rôle** : place le rôle du bot au-dessus des rôles concernés et vérifie ses permissions.
+- **`/dev projet` renvoie des fichiers coupés** : baisse `DEV_MAX_TOKENS` si ton modèle limite la taille de sortie.
+- **Erreurs d'IA** : vérifie `AI_BASE_URL`, `AI_MODEL` et ta clé ; les limites de débit des offres gratuites peuvent être atteintes.
+- 
+  ## 🙏 Crédits
 
 - [discord.py](https://github.com/Rapptz/discord.py)
 - [Open-Meteo](https://open-meteo.com/) — météo gratuite sans clé
@@ -333,3 +260,4 @@ __pycache__/
 - [Claude](https://claude.ai/new) - IA pour le code 
  
 Fait avec 🖤 — *sois sage, petit chat.*
+
