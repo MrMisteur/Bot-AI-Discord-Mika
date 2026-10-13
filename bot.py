@@ -6,6 +6,9 @@ commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift), mariage, mini-jeux 
 modération (/punition panel|deban, rôles, mute vocal, /silence, /logs), /rolereaction, /envoyer, /statu, /emoji,
 /adminpanel + /aideadmin (réservés aux admins), mémoire SQLite.
 
+NOUVEAUTÉS : /optimiser (perf + conseils), /dev (sites & apps générés par l'IA), /bienvenue (messages d'accueil
+personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge.
+
 LOGS : toutes les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles, deban)
 ET toutes les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
 avec /logs.
@@ -15,15 +18,18 @@ Python 3.10+ requis. Voir .env.example pour la config.
 import asyncio
 import datetime
 import hashlib
+import io
 import json
 import logging
 import math
 import os
+import posixpath
 import random
 import re
 import time
 import unicodedata
-from collections import Counter, defaultdict
+import zipfile
+from collections import Counter, defaultdict, deque
 from datetime import timedelta
 from itertools import combinations
 from typing import Optional
@@ -283,6 +289,8 @@ _GREET_ALL = (GREET_HELLO, GREET_HOW, GREET_DOING, GREET_NIGHT, GREET_BYE)
 
 def greeting_reply(text: str) -> Optional[str]:
     """Renvoie une réponse si le message est UNIQUEMENT une salutation courte, sinon None."""
+    if seems_down(text):
+        return None
     t = plain(text)
     if not t or len(t) > 40:
         return None
@@ -290,7 +298,6 @@ def greeting_reply(text: str) -> Optional[str]:
     doing, night, bye = bool(GREET_DOING.search(t)), bool(GREET_NIGHT.search(t)), bool(GREET_BYE.search(t))
     if not (hello or how or doing or night or bye):
         return None
-    # ce qui reste une fois les salutations retirées : si c'est une vraie phrase, ce n'est pas qu'une salutation
     rest = t
     for rx in _GREET_ALL:
         rest = rx.sub(" ", rest)
@@ -309,7 +316,6 @@ def greeting_reply(text: str) -> Optional[str]:
     if bye and not night:
         parts.append(random.choice(GREET_BYE_R))
     return " ".join(parts)
-
 
 # =====================================================================
 # BOT / CLIENT
@@ -344,6 +350,36 @@ CREATE TABLE IF NOT EXISTS game_stats (
 CREATE TABLE IF NOT EXISTS voice_timers (
     guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, until INTEGER NOT NULL,
     PRIMARY KEY (guild_id, user_id, kind));
+CREATE TABLE IF NOT EXISTS economy (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, balance INTEGER NOT NULL DEFAULT 0,
+    last_daily INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS automod_strikes (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, strikes INTEGER NOT NULL DEFAULT 0,
+    last_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS polls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL DEFAULT 0, creator_id INTEGER NOT NULL, question TEXT NOT NULL,
+    options TEXT NOT NULL, multiple INTEGER NOT NULL DEFAULT 0, ends_at INTEGER NOT NULL DEFAULT 0,
+    closed INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_polls_open ON polls(closed, ends_at);
+CREATE TABLE IF NOT EXISTS poll_votes (
+    poll_id INTEGER NOT NULL, user_id INTEGER NOT NULL, opt INTEGER NOT NULL,
+    PRIMARY KEY (poll_id, user_id, opt));
+CREATE TABLE IF NOT EXISTS tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL, subject TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+    claimed_by INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, closed_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(guild_id, user_id, status);
+CREATE INDEX IF NOT EXISTS idx_tickets_channel ON tickets(channel_id);
+CREATE TABLE IF NOT EXISTS quizzes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, author_id INTEGER NOT NULL,
+    question TEXT NOT NULL, answer TEXT NOT NULL, wrongs TEXT NOT NULL, anecdote TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_quizzes_guild ON quizzes(guild_id, author_id);
+CREATE TABLE IF NOT EXISTS kahoots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, author_id INTEGER NOT NULL,
+    title TEXT NOT NULL, questions TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_kahoots_guild ON kahoots(guild_id, author_id);
 """
 
 
@@ -357,9 +393,12 @@ class MikaBot(discord.Client):
         self.db = await aiosqlite.connect(DB_PATH)
         await self.db.executescript(SCHEMA)
         await self.db.commit()
-        self.add_dynamic_items(RoleButton)  # boutons de rôles : actifs même après un redémarrage
+        # boutons persistants (rôles, sondages, tickets) : actifs même après un redémarrage
+        self.add_dynamic_items(RoleButton, PollVote, PollEnd, TicketOpen, TicketClose, TicketClaim)
         if not voice_timer_loop.is_running():
             voice_timer_loop.start()
+        if not poll_loop.is_running():
+            poll_loop.start()
         # Sync des commandes seulement si elles ont changé (ou SYNC_ON_START=1, ou /sync)
         sig = commands_signature()
         rows = await db_all("SELECT value FROM settings WHERE guild_id=0 AND key='cmd_sig'")
@@ -375,6 +414,8 @@ class MikaBot(discord.Client):
     async def close(self):
         if voice_timer_loop.is_running():
             voice_timer_loop.cancel()
+        if poll_loop.is_running():
+            poll_loop.cancel()
         if hasattr(self, "db"):
             await self.db.close()
         await super().close()
@@ -478,6 +519,7 @@ GAMES = {
     "poker": "♠️ Poker",
     "pfc": "✂️ Pierre-feuille-ciseaux",
     "quiz": "🧠 Quiz",
+    "kahoot": "🎯 Kahoot",
 }
 POINTS = {"win": 10, "draw": 3, "loss": 1}  # victoire / égalité / participation
 _UPSERT = (
@@ -545,14 +587,17 @@ def extract_json(raw: str) -> dict:
     return json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
 
 
-async def ask_json(prompt: str, tries: int = 2, system: str = PERSONA) -> dict:
+async def ask_json(prompt: str, tries: int = 2, system: str = PERSONA, max_tokens: int = 1200) -> dict:
     """Demande du JSON à l'IA, avec un nouvel essai si le JSON est cassé."""
     last: Optional[Exception] = None
     for _ in range(tries):
         try:
-            raw = await ask_ai([{"role": "user", "content": prompt}], system=system, json_mode=True, temperature=0.8)
+            raw = await ask_ai(
+                [{"role": "user", "content": prompt}], system=system, json_mode=True,
+                temperature=0.8, max_tokens=max_tokens,
+            )
             return extract_json(raw)
-        except ValueError as e:  # json.JSONDecodeError hérite de ValueError
+        except ValueError as e:
             last = e
             log.warning("JSON invalide, nouvel essai : %s", e)
     raise ValueError("JSON invalide après plusieurs essais") from last
@@ -732,8 +777,10 @@ def is_reply_to_bot(message: discord.Message) -> bool:
 # =====================================================================
 # LOGS STAFF : sanctions + commandes du bot (salon défini avec /logs)
 # =====================================================================
-async def mod_log(guild: discord.Guild, embed: discord.Embed) -> bool:
-    """Envoie un embed dans le salon de logs du serveur (False si pas de salon / envoi impossible)."""
+async def mod_log(guild: discord.Guild, embed: discord.Embed, cat: Optional[str] = None) -> bool:
+    """Envoie un embed dans le salon de logs du serveur (False si pas de salon / type coupé / envoi impossible)."""
+    if not await log_cat_enabled(guild.id, cat or guess_log_cat(embed)):
+        return False
     try:
         cid = int(await get_setting(guild.id, "log_channel", "0") or 0)
     except ValueError:
@@ -749,7 +796,7 @@ async def mod_log(guild: discord.Guild, embed: discord.Embed) -> bool:
 
 
 # Commandes qui écrivent déjà leur propre log détaillé (évite les doublons)
-LOG_SKIP = {"envoyer", "punition deban"}
+LOG_SKIP = {"envoyer", "punition deban", "purge", "annonce", "supprimersalon", "role creer", "role supprimer"}
 
 
 def _opt_value(v) -> str:
@@ -1455,7 +1502,7 @@ QUIZ_SYSTEM = "Tu es un générateur de quiz de culture générale fiable. Tu r�
 
 class QuizButton(discord.ui.Button):
     def __init__(self, label: str, correct: bool):
-        super().__init__(label=label[:80], style=discord.ButtonStyle.secondary)
+        super().__init__(label=(label.strip() or "—")[:80], style=discord.ButtonStyle.secondary)
         self.correct = correct
 
     async def callback(self, interaction: discord.Interaction):
@@ -1463,14 +1510,18 @@ class QuizButton(discord.ui.Button):
         uid = interaction.user.id
         if view.done:
             return await interaction.response.send_message("Trop tard, quelqu'un a déjà gagné 😏", ephemeral=True)
+        if uid == view.author_id:
+            return await interaction.response.send_message("C'est ton propre quiz, laisse jouer les autres 😏", ephemeral=True)
         if uid in view.rates:
             return await interaction.response.send_message("T'as déjà tenté, laisse les autres jouer 😌", ephemeral=True)
         if not self.correct:
             view.rates.add(uid)
-            spawn(record_many(interaction.guild_id, "quiz", {uid: "loss"}))
+            if view.ranked:
+                spawn(record_many(interaction.guild_id, "quiz", {uid: "loss"}))
             return await interaction.response.send_message("Raté 😏", ephemeral=True)
         view.done = True
-        spawn(record_many(interaction.guild_id, "quiz", {uid: "win"}))
+        if view.ranked:
+            spawn(record_many(interaction.guild_id, "quiz", {uid: "win"}))
         view.reveal()
         await interaction.response.edit_message(
             content=(
@@ -1483,9 +1534,10 @@ class QuizButton(discord.ui.Button):
 
 
 class QuizView(discord.ui.View):
-    def __init__(self, header: str, bonne: str, choix: list[str], anecdote: str):
+    def __init__(self, header: str, bonne: str, choix: list[str], anecdote: str, author_id: int = 0, ranked: bool = True):
         super().__init__(timeout=30)
         self.header, self.bonne, self.anecdote = header, bonne, anecdote
+        self.author_id, self.ranked = author_id, ranked
         self.done = False
         self.rates: set[int] = set()
         self.message: Optional[discord.Message] = None
@@ -1594,8 +1646,8 @@ def bj_cards(hand: list[tuple[str, str]], hide_second: bool = False) -> str:
 class BJTable:
     """État d'une partie. status : play / stand / bust / bj."""
 
-    def __init__(self, ids: list[int], names: dict[int, str], guild_id: Optional[int] = None):
-        self.ids, self.names, self.guild_id = ids, names, guild_id
+    def __init__(self, ids: list[int], names: dict[int, str], guild_id: Optional[int] = None, bet: int = 0):
+        self.ids, self.names, self.guild_id, self.bet = ids, names, guild_id, bet
         self.deck = bj_deck()
         self.hands = {i: [self.deck.pop(), self.deck.pop()] for i in ids}
         self.dealer = [self.deck.pop(), self.deck.pop()]
@@ -1613,6 +1665,7 @@ class BJTable:
                 self.dealer.append(self.deck.pop())
         dv = bj_value(self.dealer)
         dealer_bj = len(self.dealer) == 2 and dv == 21
+        payouts = {}
         for pid in self.ids:
             v, st = bj_value(self.hands[pid]), self.status[pid]
             if st == "bust":
@@ -1629,6 +1682,17 @@ class BJTable:
                 res = "🤝 Égalité"
             else:
                 res = "💀 Perdu"
+            if st == "bj" and "🏆" in res:
+                pay = self.bet * 5 // 2      # blackjack naturel : x2,5
+            elif "🏆" in res:
+                pay = self.bet * 2           # victoire : x2
+            elif "🤝" in res:
+                pay = self.bet               # égalité : mise rendue
+            else:
+                pay = 0
+            payouts[pid] = pay
+            if self.bet:
+                res += f" • {pay - self.bet:+d} {COIN}"
             if pid in self.afk:
                 res += " • 💤 AFK"
             self.results[pid] = res
@@ -1637,6 +1701,10 @@ class BJTable:
                 pid: ("win" if "🏆" in r else "draw" if "🤝" in r else "loss") for pid, r in self.results.items()
             }
             spawn(record_many(self.guild_id, "blackjack", outcomes))
+            if self.bet:
+                for pid, pay in payouts.items():
+                    if pay:
+                        spawn(eco_add(self.guild_id, pid, pay))
 
     def embed(self, final: bool = False) -> discord.Embed:
         cur = self.current()
@@ -1654,6 +1722,8 @@ class BJTable:
             desc = f"👉 C'est au tour de <@{cur}>" if cur else ""
             color = COLOR_PURPLE
         e = emb("🃏 Blackjack", desc, color)
+        if self.bet:
+            e.description = (e.description or "") + f"\n💰 Mise : **{self.bet}** {COIN} par joueur"
         dv = bj_value(self.dealer)
         if final:
             dline = f"{bj_cards(self.dealer)} → **{dv}**" + (" 💥" if dv > 21 else "")
@@ -1738,9 +1808,10 @@ class BJTurnView(discord.ui.View):
 
 
 class BJLobby(discord.ui.View):
-    def __init__(self, host: discord.abc.User):
+    def __init__(self, host: discord.abc.User, bet: int = 0):
         super().__init__(timeout=120)
         self.host_id = host.id
+        self.bet = bet
         self.players: dict[int, str] = {host.id: host.display_name}
         self.started = False
         self.message: Optional[discord.Message] = None
@@ -1753,6 +1824,8 @@ class BJLobby(discord.ui.View):
             f"(max {BJ_MAX_PLAYERS}).\n\n**Joueurs ({len(self.players)}/{BJ_MAX_PLAYERS})**\n{lines}",
             COLOR_PURPLE,
         )
+        if self.bet:
+            e.description += f"\n\n💰 **Mise : {self.bet}** {COIN} par joueur (prélevée au lancement)"
         e.set_footer(text=f"L'hôte lance la partie • 2 minutes • {BOT_NAME} 🖤")
         return e
 
@@ -1763,6 +1836,8 @@ class BJLobby(discord.ui.View):
             return await interaction.response.send_message("T'es déjà à la table 😌", ephemeral=True)
         if len(self.players) >= BJ_MAX_PLAYERS:
             return await interaction.response.send_message("Table complète 😅", ephemeral=True)
+        if self.bet and await eco_balance(interaction.guild_id, uid) < self.bet:
+            return await interaction.response.send_message(f"💸 Il te faut {self.bet} {COIN} pour rejoindre.", ephemeral=True)
         self.players[uid] = interaction.user.display_name
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
@@ -1786,8 +1861,18 @@ class BJLobby(discord.ui.View):
             return await interaction.response.send_message("Seul l'hôte peut lancer la partie 😏", ephemeral=True)
         self.started = True
         self.stop()
-        table = BJTable(list(self.players), dict(self.players), interaction.guild_id)
+        players, refused = await collect_bets(interaction.guild_id, self.players, self.bet)
+        if not players:
+            return await interaction.response.edit_message(
+                embed=emb("🃏 Table annulée", "Personne n'a assez de pièces pour la mise.", COLOR_DARK), view=None
+            )
+        table = BJTable(list(players), dict(players), interaction.guild_id, self.bet)
         await table.start(interaction, from_lobby=True)
+        if refused:
+            await interaction.followup.send(
+                "💸 Pas assez de pièces, retirés de la table : " + ", ".join(f"<@{u}>" for u in refused),
+                allowed_mentions=NO_PINGS,
+            )
 
     async def on_timeout(self):
         if self.started or not self.message:
@@ -1801,24 +1886,35 @@ class BJLobby(discord.ui.View):
 
 
 @bot.tree.command(name="blackjack", description="Blackjack contre moi, seul ou à plusieurs 🃏")
-@app_commands.describe(mode="Solo contre Mika, ou une table ouverte aux autres")
+@app_commands.describe(
+    mode="Solo contre Mika, ou une table ouverte aux autres",
+    mise="Mise en pièces (0 = sans mise). Il faut activer l'économie avec /ecopanel",
+)
 @app_commands.choices(mode=[
     app_commands.Choice(name="🃏 Solo contre Mika", value="solo"),
     app_commands.Choice(name="👥 À la table (multi, jusqu'à 5)", value="table"),
 ])
 @app_commands.guild_only()
-async def blackjack(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+async def blackjack(
+    interaction: discord.Interaction, mode: app_commands.Choice[str],
+    mise: app_commands.Range[int, 0, 1_000_000_000] = 0,
+):
     user = interaction.user
+    err = await bet_error(interaction.guild_id, user.id, mise)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
     if mode.value == "solo":
-        table = BJTable([user.id], {user.id: user.display_name}, interaction.guild_id)
+        if mise and not await eco_charge(interaction.guild_id, user.id, mise):
+            return await interaction.response.send_message("💸 Pas assez de pièces.", ephemeral=True)
+        table = BJTable([user.id], {user.id: user.display_name}, interaction.guild_id, mise)
         return await table.start(interaction)
-    lobby = BJLobby(user)
+    lobby = BJLobby(user, mise)
     await interaction.response.send_message(embed=lobby.embed(), view=lobby)
     lobby.message = await interaction.original_response()
 
 
 # =====================================================================
-# POKER — Texas Hold'em simplifié (sans mises) : 1 à 6 joueurs contre Mika, qui joue aussi
+# POKER — Texas Hold'em simplifié (mises optionnelles) : 1 à 6 joueurs contre Mika, qui joue aussi
 #   Chaque tour (pré-flop, flop, turn, river) : « Suivre » ou « Se coucher ». Meilleure main à l'abattage.
 # =====================================================================
 PK_RANKS = "23456789TJQKA"
@@ -1879,8 +1975,12 @@ def pk_best(cards: list) -> Optional[tuple]:
     return max(pk_score5(list(c)) for c in combinations(cards, 5))
 
 
+PK_MAX_RAISES = 2  # relances max par tour de mise
+
+
 class PokerGame:
-    def __init__(self, ids: list, names: dict, guild_id: Optional[int]):
+    def __init__(self, ids: list, names: dict, guild_id: Optional[int], bet: int = 0):
+        self.bet = bet
         self.ids = list(ids)
         self.names = dict(names)
         self.names[MIKA_ID] = BOT_NAME
@@ -1897,6 +1997,15 @@ class PokerGame:
         self.winners: list = []
         self.final_text = ""
         self.message: Optional[discord.Message] = None
+        # --- relances : ce que chacun a mis dans le pot (Mika = la maison) ---
+        self.contrib = {p: bet for p in self.seats}
+        self.current_bet = bet          # niveau de mise à atteindre pour rester dans la main
+        self.raises = 0                 # relances faites pendant ce tour
+        self.view: Optional["PKRoundView"] = None
+
+    @property
+    def pot(self) -> int:
+        return sum(self.contrib.values())
 
     # ---- état ----
     def active(self) -> list:
@@ -1919,6 +2028,36 @@ class PokerGame:
         p = {0: 0.35 + 0.10 * self.stage, 1: 0.10}.get(cat, 0.0)
         return random.random() < p
 
+    def _mika_folds_raise(self) -> bool:
+        """Mika face à une relance : plus prudente que d'habitude."""
+        hand = self.hands[MIKA_ID]
+        if self.stage == 0:
+            hi = max(hand[0][0], hand[1][0])
+            strong = hand[0][0] == hand[1][0] or hi >= 12 or (hand[0][1] == hand[1][1] and hi >= 10)
+            return random.random() < (0.15 if strong else 0.55)
+        cat = pk_best(hand + self.visible_board())[0]
+        return random.random() < {0: 0.65, 1: 0.35, 2: 0.10}.get(cat, 0.03)
+
+    def mika_respond_raise(self):
+        if MIKA_ID in self.folded:
+            return
+        if self._mika_folds_raise():
+            self.folded.add(MIKA_ID)
+            self.mika_note = f"🏳️ {BOT_NAME} se couche face à la relance."
+        else:
+            self.contrib[MIKA_ID] = self.current_bet  # la maison suit
+            self.mika_note = f"😈 {BOT_NAME} suit la relance ({self.current_bet} {COIN})."
+
+    async def raise_limits(self) -> tuple[int, int]:
+        """(relance min, relance max). Max = ce que le joueur le plus pauvre peut encore suivre."""
+        room = None
+        for p in self.active_humans():
+            bal = await eco_balance(self.guild_id, p)
+            r = bal + self.contrib[p] - self.current_bet
+            room = r if room is None else min(room, r)
+        hi = min(max(room or 0, 0), await eco_cfg(self.guild_id, "max_bet"))
+        return max(1, self.bet), hi
+
     # ---- affichage ----
     def embed(self, view: Optional["PKRoundView"] = None, final: bool = False) -> discord.Embed:
         shown = 5 if final else len(self.visible_board())
@@ -1927,9 +2066,14 @@ class PokerGame:
             desc = self.final_text
             color = COLOR_PINK
         else:
-            desc = f"**{PK_STAGES[self.stage]}** — suis ou couche-toi ({PK_TURN_TIMEOUT}s)."
+            how = "suis, relance ou couche-toi" if self.bet else "suis ou couche-toi"
+            desc = f"**{PK_STAGES[self.stage]}** — {how} ({PK_TURN_TIMEOUT}s)."
             if self.mika_note:
                 desc += f"\n{self.mika_note}"
+            if self.bet:
+                desc += f"\n💰 Pot : **{self.pot}** {COIN}"
+                if self.current_bet > self.bet:
+                    desc += f" • mise à suivre : **{self.current_bet}** {COIN} chacun"
             color = COLOR_PURPLE
         e = emb("♠️ Poker — Texas Hold'em", desc, color)
         e.add_field(name="🃏 Tableau", value=board, inline=False)
@@ -1948,7 +2092,7 @@ class PokerGame:
                 val = f"{CARD_BACK} {CARD_BACK}\n😏 Reste"
             else:
                 st = view.decided.get(p) if view else None
-                val = {"call": "✅ Suit", "fold": "🏳️ Couché(e)"}.get(st, "⏳ Réfléchit…")
+                val = {"call": "✅ Suit", "raise": "🔼 Relance", "fold": "🏳️ Couché(e)"}.get(st, "⏳ Réfléchit…")
             e.add_field(name=name, value=val, inline=True)
         if not final:
             e.set_footer(text=f"« Mes cartes » pour voir ta main (privé) • {BOT_NAME} 🖤")
@@ -1957,10 +2101,12 @@ class PokerGame:
     # ---- déroulé ----
     def enter_round(self):
         self.mika_note = ""
+        self.raises = 0
         if MIKA_ID not in self.folded and len(self.active_humans()) >= 2 and self._mika_folds():
             self.folded.add(MIKA_ID)
             self.mika_note = f"🏳️ {BOT_NAME} se couche."
         view = PKRoundView(self, self.active_humans())
+        self.view = view
         return self.embed(view), view
 
     async def start(self, interaction: discord.Interaction):
@@ -1984,6 +2130,14 @@ class PokerGame:
 
     def finish(self) -> discord.Embed:
         act = self.active()
+        if not act:
+            self.winners = []
+            self.final_text = "🏳️ Tout le monde s'est couché : la main est annulée."
+            if self.bet and self.guild_id:  # mises rendues (ante + relances déjà payées)
+                for p in self.ids:
+                    spawn(eco_add(self.guild_id, p, self.contrib[p]))
+                self.final_text += f"\n💰 Mises rendues ({COIN})."
+            return self.embed(final=True)  # pas de stats pour une main annulée
         if len(act) == 1:
             self.winners = act
             w = act[0]
@@ -2008,79 +2162,188 @@ class PokerGame:
             else:
                 outcomes[p] = "loss"
         spawn(record_many(self.guild_id, "poker", outcomes))
+        if self.bet and self.guild_id:
+            pot = self.pot  # ante + relances de tout le monde (Mika comprise)
+            humans = [p for p in self.winners if p != MIKA_ID]
+            if humans:
+                share = pot // len(self.winners)
+                for p in humans:
+                    spawn(eco_add(self.guild_id, p, share))
+                self.final_text += f"\n💰 Pot de **{pot}** {COIN} : **{share}** {COIN} pour chaque gagnant."
+            else:
+                self.final_text += f"\n💰 {BOT_NAME} empoche le pot de **{pot}** {COIN}."
         return self.embed(final=True)
+
+# ---------- Poker : boutons d'un tour, relance, lobby, commande ----------
+class PKRaiseModal(discord.ui.Modal):
+    def __init__(self, pkview: "PKRoundView", lo: int, hi: int):
+        super().__init__(title="🔼 Relancer", timeout=120)
+        self.pkview = pkview
+        self.montant = discord.ui.TextInput(label=f"Relance ({lo} à {hi})"[:45], default=str(lo), max_length=10)
+        self.add_item(self.montant)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.montant.value.strip()
+        if not raw.isdigit():
+            return await interaction.response.send_message("🔢 Mets un nombre entier positif.", ephemeral=True)
+        await self.pkview.do_raise(interaction, int(raw))
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.error("Erreur du modal de relance", exc_info=error)
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send("😅 Y'a eu un bug, réessaie.", ephemeral=True)
 
 
 class PKRoundView(discord.ui.View):
-    def __init__(self, game: PokerGame, required: list):
+    """Un tour de mise : chaque joueur encore en jeu choisit Suivre / Relancer / Se coucher."""
+
+    def __init__(self, game: "PokerGame", players: list):
         super().__init__(timeout=PK_TURN_TIMEOUT)
         self.game = game
-        self.required = list(required)
+        self.players = list(players)
         self.decided: dict = {}
+        self.lock = game.__dict__.setdefault("_lock", asyncio.Lock())
+        if not game.bet:
+            self.remove_item(self.b_raise)          # pas de mise : pas de relance
+        elif game.raises >= PK_MAX_RAISES:
+            self.b_raise.disabled = True
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id not in self.game.ids:
-            await interaction.response.send_message("Tu ne joues pas à cette table, petit chat 😏", ephemeral=True)
+    async def _check(self, interaction: discord.Interaction) -> bool:
+        """Vérifie que l'action est encore possible pour ce joueur (à appeler sous le verrou)."""
+        uid = interaction.user.id
+        if self.game.view is not self:
+            await interaction.response.send_message("⌛ Ce tour est déjà terminé.", ephemeral=True)
+            return False
+        if uid not in self.players:
+            msg = "Tu es couché(e) ou tu ne joues pas ici 😏" if uid not in self.game.ids else "Tu es déjà couché(e) 😏"
+            await interaction.response.send_message(msg, ephemeral=True)
+            return False
+        if uid in self.decided:
+            await interaction.response.send_message("T'as déjà décidé, patience 😌", ephemeral=True)
             return False
         return True
 
-    async def _decide(self, interaction: discord.Interaction, fold: bool):
-        uid = interaction.user.id
-        if uid in self.game.folded:
-            return await interaction.response.send_message("T'es déjà couché(e) 😌", ephemeral=True)
-        if uid in self.decided:
-            return await interaction.response.send_message("T'as déjà choisi pour ce tour 😏", ephemeral=True)
-        self.decided[uid] = "fold" if fold else "call"
-        if fold:
-            self.game.folded.add(uid)
-        everyone = all(p in self.decided for p in self.required)
-        if everyone or len(self.game.active()) <= 1:
-            self.stop()
-            return await self.game.advance(interaction)
-        await interaction.response.edit_message(embed=self.game.embed(self), view=self)
-
-    @discord.ui.button(label="Suivre", emoji="✅", style=discord.ButtonStyle.success)
-    async def call(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._decide(interaction, fold=False)
-
-    @discord.ui.button(label="Se coucher", emoji="🏳️", style=discord.ButtonStyle.danger)
-    async def fold(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._decide(interaction, fold=True)
-
-    @discord.ui.button(label="Mes cartes", emoji="🃏", style=discord.ButtonStyle.secondary)  # ← corrigé (🂠 invalide)
-    async def mine(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _after(self, interaction: discord.Interaction):
         g = self.game
-        hand = g.hands[interaction.user.id]
-        txt = f"Tes cartes : {pk_cards(hand)}"
-        best = pk_best(hand + g.visible_board())
+        if all(p in self.decided for p in self.players):
+            self.stop()
+            await g.advance(interaction)
+        else:
+            await interaction.response.edit_message(embed=g.embed(self), view=self)
+
+    @discord.ui.button(label="Suivre", emoji="✅", style=discord.ButtonStyle.success, row=0)
+    async def b_call(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g, uid = self.game, interaction.user.id
+        async with self.lock:
+            if not await self._check(interaction):
+                return
+            diff = g.current_bet - g.contrib[uid]
+            if diff > 0:
+                if not await eco_charge(g.guild_id, uid, diff):
+                    return await interaction.response.send_message(
+                        f"💸 Il te faut **{diff}** {COIN} pour suivre : couche-toi ou trouve des pièces.", ephemeral=True
+                    )
+                g.contrib[uid] = g.current_bet
+            self.decided[uid] = "call"
+            await self._after(interaction)
+
+    @discord.ui.button(label="Relancer", emoji="🔼", style=discord.ButtonStyle.primary, row=0)
+    async def b_raise(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g = self.game
+        async with self.lock:
+            if not await self._check(interaction):
+                return
+            if g.raises >= PK_MAX_RAISES:
+                return await interaction.response.send_message("🔼 Relances max atteintes pour ce tour.", ephemeral=True)
+            lo, hi = await g.raise_limits()
+            if hi < lo:
+                return await interaction.response.send_message(
+                    "💸 Impossible de relancer : un joueur n'aurait plus assez de pièces pour suivre.", ephemeral=True
+                )
+        await interaction.response.send_modal(PKRaiseModal(self, lo, hi))
+
+    async def do_raise(self, interaction: discord.Interaction, amount: int):
+        g, uid = self.game, interaction.user.id
+        async with self.lock:
+            if not await self._check(interaction):
+                return
+            if g.raises >= PK_MAX_RAISES:
+                return await interaction.response.send_message("🔼 Relances max atteintes pour ce tour.", ephemeral=True)
+            lo, hi = await g.raise_limits()  # les soldes ont pu changer depuis l'ouverture du modal
+            if not lo <= amount <= hi:
+                return await interaction.response.send_message(
+                    f"🔢 La relance doit être comprise entre **{lo}** et **{hi}** {COIN}.", ephemeral=True
+                )
+            new_bet = g.current_bet + amount
+            if not await eco_charge(g.guild_id, uid, new_bet - g.contrib[uid]):
+                return await interaction.response.send_message("💸 Pas assez de pièces.", ephemeral=True)
+            g.current_bet = new_bet
+            g.contrib[uid] = new_bet
+            g.raises += 1
+            g.mika_respond_raise()
+            self.stop()
+            humans = g.active_humans()
+            nxt = PKRoundView(g, humans)
+            nxt.decided[uid] = "raise"
+            if all(p in nxt.decided for p in humans):  # tous les autres se sont couchés
+                return await g.advance(interaction)
+            g.view = nxt
+            await interaction.response.edit_message(embed=g.embed(nxt), view=nxt)
+
+    @discord.ui.button(label="Se coucher", emoji="🏳️", style=discord.ButtonStyle.danger, row=0)
+    async def b_fold(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.lock:
+            if not await self._check(interaction):
+                return
+            self.game.folded.add(interaction.user.id)
+            self.decided[interaction.user.id] = "fold"
+            await self._after(interaction)
+
+    @discord.ui.button(label="Mes cartes", emoji="🃏", style=discord.ButtonStyle.secondary, row=1)
+    async def b_cards(self, interaction: discord.Interaction, button: discord.ui.Button):
+        g, uid = self.game, interaction.user.id
+        if uid not in g.ids:
+            return await interaction.response.send_message("Tu ne joues pas cette main 😏", ephemeral=True)
+        hand, board = g.hands[uid], g.visible_board()
+        txt = f"🃏 Tes cartes : {pk_cards(hand)}\n🎴 Tableau : {pk_cards(board) if board else '—'}"
+        best = pk_best(hand + board)
         if best:
-            txt += f"\nMain actuelle : **{PK_HANDS[best[0]]}**"
+            txt += f"\n✨ Main actuelle : **{PK_HANDS[best[0]]}**"
         await interaction.response.send_message(txt, ephemeral=True)
 
     async def on_timeout(self):
-        for p in self.required:
-            if p not in self.decided:
-                self.game.folded.add(p)
-                self.game.afk.add(p)
-        await self.game.advance(None)
+        g = self.game
+        async with self.lock:
+            if g.view is not self:
+                return
+            for p in self.players:
+                if p not in self.decided:
+                    self.decided[p] = "fold"
+                    g.folded.add(p)
+                    g.afk.add(p)
+            await g.advance(None)
 
 
 class PKLobby(discord.ui.View):
-    def __init__(self, host: discord.abc.User):
+    def __init__(self, host: discord.abc.User, bet: int = 0):
         super().__init__(timeout=120)
         self.host_id = host.id
-        self.players: dict = {host.id: host.display_name}
+        self.bet = bet
+        self.players: dict[int, str] = {host.id: host.display_name}
         self.started = False
         self.message: Optional[discord.Message] = None
 
     def embed(self) -> discord.Embed:
-        lines = "\n".join(f"{'👑' if p == self.host_id else '🎴'} <@{p}>" for p in self.players)
+        lines = "\n".join(f"{'👑' if pid == self.host_id else '🎴'} <@{pid}>" for pid in self.players)
         e = emb(
             "♠️ Poker — table ouverte",
-            f"Hôte : <@{self.host_id}>\n{BOT_NAME} joue aussi contre vous. Clique sur **Rejoindre** "
-            f"(max {PK_MAX_PLAYERS}).\n\n**Joueurs ({len(self.players)}/{PK_MAX_PLAYERS})**\n{lines}",
+            f"Hôte : <@{self.host_id}>\nClique sur **Rejoindre** pour jouer contre {BOT_NAME} "
+            f"(max {PK_MAX_PLAYERS}). L'hôte peut aussi lancer seul.\n\n"
+            f"**Joueurs ({len(self.players)}/{PK_MAX_PLAYERS})**\n{lines}",
             COLOR_PURPLE,
         )
+        if self.bet:
+            e.description += f"\n\n💰 **Mise : {self.bet}** {COIN} par joueur (prélevée au lancement, {BOT_NAME} mise aussi)"
         e.set_footer(text=f"L'hôte lance la partie • 2 minutes • {BOT_NAME} 🖤")
         return e
 
@@ -2091,6 +2354,8 @@ class PKLobby(discord.ui.View):
             return await interaction.response.send_message("T'es déjà à la table 😌", ephemeral=True)
         if len(self.players) >= PK_MAX_PLAYERS:
             return await interaction.response.send_message("Table complète 😅", ephemeral=True)
+        if self.bet and await eco_balance(interaction.guild_id, uid) < self.bet:
+            return await interaction.response.send_message(f"💸 Il te faut {self.bet} {COIN} pour rejoindre.", ephemeral=True)
         self.players[uid] = interaction.user.display_name
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
@@ -2114,8 +2379,18 @@ class PKLobby(discord.ui.View):
             return await interaction.response.send_message("Seul l'hôte peut lancer la partie 😏", ephemeral=True)
         self.started = True
         self.stop()
-        game = PokerGame(list(self.players), dict(self.players), interaction.guild_id)
+        players, refused = await collect_bets(interaction.guild_id, self.players, self.bet)
+        if not players:
+            return await interaction.response.edit_message(
+                embed=emb("♠️ Table annulée", "Personne n'a assez de pièces pour la mise.", COLOR_DARK), view=None
+            )
+        game = PokerGame(list(players), dict(players), interaction.guild_id, self.bet)
         await game.start(interaction)
+        if refused:
+            await interaction.followup.send(
+                "💸 Pas assez de pièces, retirés de la table : " + ", ".join(f"<@{u}>" for u in refused),
+                allowed_mentions=NO_PINGS,
+            )
 
     async def on_timeout(self):
         if self.started or not self.message:
@@ -2128,13 +2403,16 @@ class PKLobby(discord.ui.View):
             pass
 
 
-@bot.tree.command(name="poker", description="Poker Texas Hold'em contre moi, seul ou à plusieurs ♠️")
+@bot.tree.command(name="poker", description="Texas Hold'em contre moi, seul ou à plusieurs ♠️")
+@app_commands.describe(mise="Mise en pièces (0 = sans mise). Il faut activer l'économie avec /ecopanel")
 @app_commands.guild_only()
-async def poker(interaction: discord.Interaction):
-    lobby = PKLobby(interaction.user)
+async def poker(interaction: discord.Interaction, mise: app_commands.Range[int, 0, 1_000_000_000] = 0):
+    err = await bet_error(interaction.guild_id, interaction.user.id, mise)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    lobby = PKLobby(interaction.user, mise)
     await interaction.response.send_message(embed=lobby.embed(), view=lobby)
     lobby.message = await interaction.original_response()
-
 
 # =====================================================================
 # STATS DES JEUX : /classement, /stat
@@ -2222,44 +2500,6 @@ async def stat(interaction: discord.Interaction, joueur: Optional[discord.Member
 # =====================================================================
 # ADMIN / DIVERS
 # =====================================================================
-@bot.tree.command(name="config", description="(admin) Réglages du bot sur ce serveur")
-@app_commands.describe(
-    reactions="Réactions emoji sur les messages",
-    spontane="Rebondir de moi-même sur certains messages",
-    salutations="Répondre aux « coucou / ça va ? » même sans mention",
-    nom="Répondre quand on écrit mon prénom, même sans mention",
-)
-@app_commands.guild_only()
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def config(
-    interaction: discord.Interaction,
-    reactions: Optional[bool] = None,
-    spontane: Optional[bool] = None,
-    salutations: Optional[bool] = None,
-    nom: Optional[bool] = None,
-):
-    if reactions is not None:
-        await set_flag(interaction.guild_id, "reactions", reactions)
-    if spontane is not None:
-        await set_flag(interaction.guild_id, "spontane", spontane)
-    if salutations is not None:
-        await set_flag(interaction.guild_id, "salutations", salutations)
-    if nom is not None:
-        await set_flag(interaction.guild_id, "nom", nom)
-    r = await get_flag(interaction.guild_id, "reactions", True)
-    s = await get_flag(interaction.guild_id, "spontane", False)
-    g = await get_flag(interaction.guild_id, "salutations", True)
-    n = await get_flag(interaction.guild_id, "nom", True)
-    style = STYLES[await get_style(interaction.guild_id)][0]
-    await interaction.response.send_message(
-        f"⚙️ Réactions emoji : **{'on' if r else 'off'}** • Rebonds spontanés : **{'on' if s else 'off'}** "
-        f"• Salutations : **{'on' if g else 'off'}** • Réponse au prénom : **{'on' if n else 'off'}** "
-        f"• Style : **{style}**",
-        ephemeral=True,
-    )
-
-
 @bot.tree.command(name="style", description="(admin) Change ma personnalité sur ce serveur 🎭")
 @app_commands.describe(style="Le style à utiliser")
 @app_commands.choices(style=[app_commands.Choice(name=label, value=key) for key, (label, _) in STYLES.items()])
@@ -2382,7 +2622,9 @@ def role_problem(role: discord.Role, guild: discord.Guild) -> Optional[str]:
 
 class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"rr:(?P<role_id>[0-9]+)"):
     def __init__(self, role_id: int, label: str = "Rôle"):
-        super().__init__(discord.ui.Button(label=label[:80], style=discord.ButtonStyle.secondary, custom_id=f"rr:{role_id}"))
+        super().__init__(discord.ui.Button(
+            label=(label.strip() or "—")[:80], style=discord.ButtonStyle.secondary, custom_id=f"rr:{role_id}",
+        ))
         self.role_id = role_id
 
     @classmethod
@@ -2534,7 +2776,11 @@ async def aide(interaction: discord.Interaction):
             "`/poker` → Texas Hold'em, seul ou jusqu'à 6 joueurs (je joue aussi).\n"
             "`/quiz [thème]` → question à 4 choix, le plus rapide gagne.\n"
             "`/ship @a @b` → la compatibilité de deux personnes.\n"
-            "`/classement [jeu]` • `/stat [joueur]` → points, victoires, K/D."
+            "`/jeux [mise]` → tous les jeux au même endroit (boutons).\n"
+            "`/classement [jeu]` • `/statu [@membre]` → profil : statut, points, K/D et argent.\n"
+            "`/pfcduel @membre [mise]` → duel pierre-feuille-ciseaux contre un joueur.\n"
+            "`/quizperso creer|jouer|liste|supprimer` → les quiz créés par les membres.\n"
+            "`/kahoot creer|generer|lancer|liste|supprimer` → des Kahoot (quiz live multi-joueurs), créés par toi ou par l'IA.\n"
         ),
         inline=False,
     )
@@ -2547,12 +2793,36 @@ async def aide(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="💰 Économie",
+        value=(
+            "`/solde [@membre]` • `/daily` (bonus quotidien) • `/donner @membre montant` • `/richesse` (top 10).\n"
+            "Dans `/blackjack` et `/poker`, l'option `mise` te fait jouer des pièces (si l'économie est activée)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📖 Règles",
+        value="`/regleblackjack` • `/reglepoker` • `/main` (classement des mains de poker).",
+        inline=False,
+    )
+    embed.add_field(
         name="🎭 Serveur",
         value=(
             "`/ping` → ma latence.\n"
-            "`/statu @membre` → statut, activité, appareils.\n"
+            "`/statu [@membre]` → profil complet (statut, jeux, argent).\n"
             "`/emoji agrandir` → un emoji perso en grand.\n"
-            "`/cc nom` ou `!nom` → commandes personnalisées du serveur."
+            "`/cc nom` ou `!nom` → commandes personnalisées du serveur.\n"
+            "`/info` → les stats du serveur."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📊 Sondages, tickets & dev",
+        value=(
+            "`/sondage question options` → sondage à boutons (durée, choix multiple) ; re-clique pour retirer ton vote.\n"
+            "🎫 **Tickets** → clique sur « Ouvrir un ticket » dans le salon d'assistance ; `/ticket fermer` pour clore.\n"
+            "`/dev projet` → l'IA te génère un site / une app (zip prêt à lancer).\n"
+            "`/dev question` → aide au code : bug, architecture, explication."
         ),
         inline=False,
     )
@@ -2585,9 +2855,34 @@ async def aideadmin(interaction: discord.Interaction):
     e.add_field(
         name="⚙️ Réglages",
         value=(
-            "`/config` → réactions, rebonds spontanés, salutations, réponse au prénom.\n"
+            "`/adminpanel` → panneau complet (fonctionnalités, modération, logs avec choix des types, économie, accueil, outils).\n"
             "`/style` → dominatrice, mommy, douce ou sarcastique.\n"
             "`/logs` → salon des logs : **toutes les sanctions** et **toutes les commandes du bot** y sont tracées."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="💰 Économie",
+        value=(
+            "`/ecopanel` → panneau : activer, réglages, donner / retirer, classement.\n"
+            "`/eco config|donner|retirer|reset` → mêmes actions en commandes."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🛡️ Auto-modération",
+        value=(
+            "`/automod config` → activer, sanctions automatiques on/off, règles (spam, invitations, mentions, "
+            "majuscules, mots interdits, insultes envers le bot).\n"
+            "`/automod mot` → liste des mots interdits • `/automod pardon @membre` • `/automod statut`."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🏗️ Construction",
+        value=(
+            "`/creersalon` → salon texte, vocal ou catégorie (privé possible).\n"
+            "`/creeserveur` → l'IA conçoit un serveur complet (aperçu + confirmation avant création)."
         ),
         inline=False,
     )
@@ -2602,8 +2897,48 @@ async def aideadmin(interaction: discord.Interaction):
         ),
         inline=False,
     )
+    e.add_field(
+        name="📣 Annonces & ménage",
+        value=(
+            "`/annonce` → publie une annonce (fenêtre titre + message, ping @everyone / @here / rôle, image) — gérer le serveur.\n"
+            "`/purge nombre [membre] [salon]` → supprime jusqu'à 500 messages (épinglés et > 14 j épargnés, "
+            "confirmation au-delà de 100) — gérer les messages."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="👋 Bienvenue",
+        value=(
+            "`/bienvenue config` → salon, activer, mode **texte** ou **IA** (message unique par membre), modèle, consignes, MP.\n"
+            "`/bienvenue generer ton` → l'IA écrit un modèle (aperçu + bouton pour l'adopter) • `/bienvenue tester`."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🎫 Tickets",
+        value=(
+            "`/ticket config` → catégorie, rôle staff, salon de transcripts, limite par membre.\n"
+            "`/ticket panel` → poste le bouton « Ouvrir un ticket ».\n"
+            "`/ticket fermer|ajouter|retirer` → gérer un ticket (transcript auto à la fermeture)."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="⚡ Optimisation",
+        value="`/optimiser [test_ia]` → latences, RAM, base, caches + propositions ; boutons « Optimiser la base » et « Conseils de l'IA ».",
+        inline=False,
+    )
+    e.add_field(
+        name="🗑️ Salons & rôles",
+        value=(
+            "`/supprimersalon salon [contenu]` → supprime un salon, un vocal, un forum ou une catégorie "
+            "(`contenu:True` = supprime aussi ce qu'elle contient). Confirmation + log.\n"
+            "`/role creer nom [couleur] [permissions] [affiche] [mentionnable] [membre]` → crée un rôle.\n"
+            "`/role supprimer role` → supprime un rôle (confirmation + log)."
+        ),
+        inline=False,
+    )
     await interaction.response.send_message(embed=e, ephemeral=True)
-
 
 # =====================================================================
 # COMMANDES PERSONNALISÉES : créées par les admins, utilisables par tout le monde
@@ -2643,9 +2978,9 @@ admin_only = app_commands.checks.has_permissions(administrator=True)
 async def cc_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     if not interaction.guild_id:
         return []
-    prefix = re.sub(r"[^\w-]", "", current.lower())
+    prefix = re.sub(r"[^\w-]", "", current.lower()).replace("_", r"\_")
     rows = await db_all(
-        "SELECT name FROM custom_cmds WHERE guild_id=? AND name LIKE ? ORDER BY name LIMIT 25",
+        "SELECT name FROM custom_cmds WHERE guild_id=? AND name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 25",
         (interaction.guild_id, f"{prefix}%"),
     )
     return [app_commands.Choice(name=r[0], value=r[0]) for r in rows]
@@ -2793,9 +3128,8 @@ def weather_request(text: str) -> Optional[str]:
     city = city.strip(" '\"«»-")
     if not city:
         return ""
-    first = city.split()[0].lower().strip("',")
-    if first in WX_NOT_CITY or len(city.split()) > 5:
-        return None  # une phrase sur la météo, pas une demande
+    if city.lower().replace("’", "'") in {"aujourd'hui", "aujourdhui", "demain", "ce soir", "ce matin", "maintenant"}:
+        return ""
     low = city.lower()
     if low.startswith("au "):
         city = "Le " + city[3:]
@@ -2894,13 +3228,14 @@ _STATUS = {
     discord.Status.dnd: "⛔ Ne pas déranger", discord.Status.offline: "⚫ Hors ligne / invisible",
 }
 
-
-@bot.tree.command(name="statu", description="Affiche le statut d'un membre 🟢")
-@app_commands.describe(pseudo="Le membre")
+@bot.tree.command(name="statu", description="Profil d'un membre : statut, stats de jeu et argent 🟢")
+@app_commands.describe(pseudo="Le membre (toi par défaut)")
 @app_commands.guild_only()
-async def statu(interaction: discord.Interaction, pseudo: discord.Member):
-    m = interaction.guild.get_member(pseudo.id) or pseudo  # le membre en cache a la présence, pas celui de l'interaction
-    e = emb(f"Statut — {m.display_name}", None, COLOR_PURPLE)
+async def statu(interaction: discord.Interaction, pseudo: Optional[discord.Member] = None):
+    target = pseudo or interaction.user
+    gid = interaction.guild_id
+    m = interaction.guild.get_member(target.id) or target  # le membre en cache a la présence, pas celui de l'interaction
+    e = emb(f"Profil — {m.display_name}", None, COLOR_PURPLE)
     e.set_thumbnail(url=m.display_avatar.url)
     e.add_field(name="Statut", value=_STATUS.get(m.status, "⚫ Inconnu"), inline=True)
     devices = [n for n, s in (("🖥️ PC", m.desktop_status), ("📱 Mobile", m.mobile_status), ("🌐 Web", m.web_status))
@@ -2929,9 +3264,38 @@ async def statu(interaction: discord.Interaction, pseudo: discord.Member):
         e.add_field(name="Vocal", value=f"🔊 {m.voice.channel.mention}{flags}", inline=False)
     if m.is_timed_out():
         e.add_field(name="Sanction", value=f"🤐 Muté jusqu'à <t:{int(m.timed_out_until.timestamp())}:R>", inline=False)
+
+    # ---- stats de jeu + argent (pas pour les bots) ----
+    if not m.bot:
+        rows = await db_all(
+            "SELECT game, wins, draws, losses, points FROM game_stats WHERE guild_id=? AND user_id=?", (gid, m.id)
+        )
+        if rows:
+            W, D, L, P = (sum(r[i] for r in rows) for i in (1, 2, 3, 4))
+            board = await leaderboard(gid)
+            pos = next((i for i, r in enumerate(board) if r[0] == m.id), None)
+            desc = (
+                f"🏆 **{W}** gagnées • 💀 **{L}** perdues • 🤝 **{D}** nulles\n"
+                f"⚔️ **K/D : {_kd(W, L)}** • 📈 Victoires : **{_winrate(W, D, L)}**\n⭐ **{P} points**"
+            )
+            if pos is not None:
+                pct = max(1, math.ceil((pos + 1) * 100 / len(board)))
+                desc += f" • #{pos + 1}/{len(board)} (top {pct}%)"
+            e.add_field(name="🎮 Stats de jeu", value=desc, inline=False)
+            for game, w, d, l, pts in sorted(rows, key=lambda r: -r[4]):
+                e.add_field(
+                    name=GAMES.get(game, game),
+                    value=f"{w}V / {l}D / {d}N\nK/D {_kd(w, l)} • {pts} pts",
+                    inline=True,
+                )
+        else:
+            e.add_field(name="🎮 Stats de jeu", value="Aucune partie jouée pour l'instant 😏", inline=False)
+        if await eco_on(gid):
+            e.add_field(name="💰 Argent", value=f"**{await eco_balance(gid, m.id)}** {COIN}", inline=True)
     if not bot.intents.presences:
         e.set_footer(text="⚠️ Intent « Présences » désactivé : statut et activité ne sont pas fiables.")
     await interaction.response.send_message(embed=e)
+
 
 
 EMOJI_RE = re.compile(r"<(a?):(\w{2,32}):(\d{15,25})>")
@@ -3805,10 +4169,13 @@ async def _before_voice_timer():
 EXPECTED_COMMANDS = {
     "ask", "recherche", "roast", "blague", "8ball", "choisir", "kiss", "hug", "pat", "slap", "bonk", "gift",
     "marie", "mariage", "divorce", "pfc", "ship", "quiz", "blackjack", "poker", "classement", "stat",
-    "config", "style", "reset", "sync", "aide", "aideadmin", "adminpanel", "ping", "punition", "test",
+    "style", "reset", "sync", "aide", "aideadmin", "adminpanel", "ping", "punition", "test",
     "commande", "cc", "meteo", "statu", "emoji", "envoyer", "logs", "silence", "rolereaction",
+    "solde", "daily", "donner", "richesse", "eco", "ecopanel", "reglepoker", "regleblackjack", "main",
+    "creersalon", "creeserveur", "info", "automod",
+    "optimiser", "dev", "bienvenue", "sondage", "ticket", "annonce", "purge", "kahoot", "jeux",
 }
-REMOVED_COMMANDS = {"musique", "gouts", "favori", "inventaire"}
+REMOVED_COMMANDS = {"musique", "gouts", "favori", "inventaire", "stat"}
 
 
 async def _t_db() -> str:
@@ -3819,7 +4186,8 @@ async def _t_db() -> str:
     rows = await db_all("SELECT value FROM settings WHERE guild_id=-1 AND key='test'")
     await db_run("DELETE FROM settings WHERE guild_id=-1 AND key='test'")
     assert rows and rows[0][0] == "ok", "relecture incorrecte"
-    for table in ("history", "settings", "marriages", "marriage_members", "custom_cmds", "game_stats", "voice_timers"):
+    for table in ("history", "settings", "marriages", "marriage_members", "custom_cmds", "game_stats",
+                  "voice_timers", "economy", "automod_strikes"):
         await db_all(f"SELECT 1 FROM {table} LIMIT 1")
     return "lecture / écriture OK"
 
@@ -4039,6 +4407,7 @@ ADMIN_TOGGLES = [
     ("spontane", "Spontané", False),
     ("salutations", "Salutations", True),
     ("nom", "Prénom", True),
+    ("automod", "Auto-modération", False),
 ]
 
 
@@ -4252,16 +4621,4267 @@ class AdminPanel(discord.ui.View):
         await interaction.response.edit_message(embed=emb("🛠️ Panel fermé", "À la prochaine 🖤", COLOR_DARK), view=None)
 
 
-@bot.tree.command(name="adminpanel", description="(admin) Panel regroupant toutes les commandes admin 🛠️")
+# =====================================================================
+# ÉCONOMIE : porte-monnaie, /daily, /donner, /richesse, mises blackjack & poker
+#   Activée par un admin (/eco config actif:True ou /ecopanel). Mise optionnelle dans les jeux (mise:0 = sans mise).
+# =====================================================================
+COIN = "🪙"
+ECO_DEFAULTS = {"start": 1000, "daily": 200, "min_bet": 10, "max_bet": 5000}
+ECO_LABELS = {
+    "start": "Solde de départ", "daily": "Bonus /daily", "min_bet": "Mise minimum", "max_bet": "Mise maximum",
+}
+ECO_MAX = 1_000_000_000
+
+
+async def eco_on(gid: Optional[int]) -> bool:
+    return await get_flag(gid, "eco", False)
+
+
+async def eco_cfg(gid: Optional[int], key: str) -> int:
+    raw = await get_setting(gid, f"eco_{key}", str(ECO_DEFAULTS[key]))
+    try:
+        return int(raw)
+    except ValueError:
+        return ECO_DEFAULTS[key]
+
+
+async def eco_balance(gid: int, uid: int) -> int:
+    """Solde du joueur (le compte est créé avec le solde de départ au premier accès)."""
+    rows = await db_all("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (gid, uid))
+    if rows:
+        return rows[0][0]
+    start = await eco_cfg(gid, "start")
+    await db_run("INSERT OR IGNORE INTO economy(guild_id,user_id,balance) VALUES (?,?,?)", (gid, uid, start))
+    rows = await db_all("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (gid, uid))
+    return rows[0][0]
+
+
+async def eco_charge(gid: int, uid: int, amount: int) -> bool:
+    """Retire `amount` pièces si le solde suffit (atomique). False si pas assez."""
+    await eco_balance(gid, uid)
+    cur = await bot.db.execute(
+        "UPDATE economy SET balance=balance-? WHERE guild_id=? AND user_id=? AND balance>=?",
+        (amount, gid, uid, amount),
+    )
+    await bot.db.commit()
+    return cur.rowcount == 1
+
+
+async def eco_add(gid: int, uid: int, amount: int):
+    if amount <= 0 or uid <= 0:
+        return
+    await eco_balance(gid, uid)
+    await db_run("UPDATE economy SET balance=balance+? WHERE guild_id=? AND user_id=?", (amount, gid, uid))
+
+
+async def eco_remove(gid: int, uid: int, amount: int):
+    await eco_balance(gid, uid)
+    await db_run("UPDATE economy SET balance=MAX(balance-?,0) WHERE guild_id=? AND user_id=?", (amount, gid, uid))
+
+
+async def bet_error(gid: Optional[int], uid: int, mise: int) -> Optional[str]:
+    """None si la mise est valide (ou nulle), sinon le message d'erreur à afficher."""
+    if mise <= 0:
+        return None
+    if not gid or not await eco_on(gid):
+        return f"💸 L'économie est désactivée sur ce serveur : joue sans mise (`mise:0`)."
+    lo, hi = await eco_cfg(gid, "min_bet"), await eco_cfg(gid, "max_bet")
+    if not lo <= mise <= hi:
+        return f"💸 La mise doit être comprise entre **{lo}** et **{hi}** {COIN}."
+    bal = await eco_balance(gid, uid)
+    if bal < mise:
+        return f"💸 Il te faut **{mise}** {COIN}, tu n'en as que **{bal}**."
+    return None
+
+
+async def collect_bets(gid: Optional[int], players: dict, bet: int) -> tuple[dict, list]:
+    """Prélève la mise de chaque joueur au lancement. Renvoie (ceux qui ont payé, ceux refusés)."""
+    if bet <= 0 or not gid:
+        return dict(players), []
+    paid, refused = {}, []
+    for uid, name in players.items():
+        if await eco_charge(gid, uid, bet):
+            paid[uid] = name
+        else:
+            refused.append(uid)
+    return paid, refused
+
+
+@bot.tree.command(name="solde", description="Ton porte-monnaie 🪙")
+@app_commands.describe(membre="Voir le solde d'un autre (optionnel)")
+@app_commands.guild_only()
+async def solde(interaction: discord.Interaction, membre: Optional[discord.Member] = None):
+    if not await eco_on(interaction.guild_id):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    target = membre or interaction.user
+    if target.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de porte-monnaie 🤖", ephemeral=True)
+    bal = await eco_balance(interaction.guild_id, target.id)
+    await interaction.response.send_message(
+        embed=emb(f"👛 {target.display_name}", f"**{bal}** {COIN}", COLOR_PINK)
+    )
+
+
+@bot.tree.command(name="daily", description="Récupère ton bonus quotidien 🎁")
+@app_commands.guild_only()
+async def daily(interaction: discord.Interaction):
+    gid, uid = interaction.guild_id, interaction.user.id
+    if not await eco_on(gid):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    amount = await eco_cfg(gid, "daily")
+    now = int(time.time())
+    await eco_balance(gid, uid)
+    cur = await bot.db.execute(
+        "UPDATE economy SET balance=balance+?, last_daily=? WHERE guild_id=? AND user_id=? AND last_daily<=?",
+        (amount, now, gid, uid, now - 86400),
+    )
+    await bot.db.commit()
+    if cur.rowcount == 0:
+        rows = await db_all("SELECT last_daily FROM economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        nxt = rows[0][0] + 86400
+        return await interaction.response.send_message(
+            f"⏳ Déjà récupéré, petit chat. Reviens <t:{nxt}:R> 😏", ephemeral=True
+        )
+    bal = await eco_balance(gid, uid)
+    await interaction.response.send_message(
+        embed=emb("🎁 Bonus quotidien", f"+**{amount}** {COIN} pour toi. Solde : **{bal}** {COIN}", COLOR_PINK)
+    )
+
+
+@bot.tree.command(name="donner", description="Donne des pièces à quelqu'un 💸")
+@app_commands.describe(membre="Le destinataire", montant="Combien de pièces")
+@app_commands.guild_only()
+async def donner(interaction: discord.Interaction, membre: discord.Member, montant: app_commands.Range[int, 1, ECO_MAX]):
+    gid = interaction.guild_id
+    if not await eco_on(gid):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    if membre.bot or membre.id == interaction.user.id:
+        return await interaction.response.send_message("Choisis quelqu'un d'autre que toi (et pas un bot) 😏", ephemeral=True)
+    if not await eco_charge(gid, interaction.user.id, montant):
+        bal = await eco_balance(gid, interaction.user.id)
+        return await interaction.response.send_message(f"💸 Tu n'as que **{bal}** {COIN}.", ephemeral=True)
+    await eco_add(gid, membre.id, montant)
+    await interaction.response.send_message(
+        f"💸 {interaction.user.mention} offre **{montant}** {COIN} à {membre.mention}. Quelle générosité 🖤",
+        allowed_mentions=USER_PINGS,
+    )
+
+
+@bot.tree.command(name="richesse", description="Les plus riches du serveur 💰")
+@app_commands.guild_only()
+async def richesse(interaction: discord.Interaction):
+    if not await eco_on(interaction.guild_id):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    rows = await db_all(
+        "SELECT user_id, balance FROM economy WHERE guild_id=? ORDER BY balance DESC, user_id ASC LIMIT 10",
+        (interaction.guild_id,),
+    )
+    if not rows:
+        return await interaction.response.send_message("Personne n'a encore de pièces 😏", ephemeral=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"{medals[i] if i < 3 else f'`#{i + 1}`'} <@{u}> — **{b}** {COIN}" for i, (u, b) in enumerate(rows)]
+    await interaction.response.send_message(
+        embed=emb("💰 Les plus riches", "\n".join(lines), COLOR_PURPLE), allowed_mentions=NO_PINGS
+    )
+
+
+# ---------- Commandes admin : /eco config|donner|retirer|reset ----------
+eco_group = app_commands.Group(
+    name="eco", description="(admin) Gère l'économie du serveur 💰",
+    guild_only=True, default_permissions=discord.Permissions(administrator=True),
+)
+
+
+@eco_group.command(name="config", description="Active l'économie et règle les montants")
+@app_commands.describe(
+    actif="Activer / désactiver l'économie", depart="Solde de départ", daily="Montant du /daily",
+    mise_min="Mise minimum", mise_max="Mise maximum",
+)
+@admin_only
+async def eco_config(
+    interaction: discord.Interaction, actif: Optional[bool] = None,
+    depart: Optional[app_commands.Range[int, 0, ECO_MAX]] = None,
+    daily: Optional[app_commands.Range[int, 0, ECO_MAX]] = None,
+    mise_min: Optional[app_commands.Range[int, 1, ECO_MAX]] = None,
+    mise_max: Optional[app_commands.Range[int, 1, ECO_MAX]] = None,
+):
+    gid = interaction.guild_id
+    lo = mise_min if mise_min is not None else await eco_cfg(gid, "min_bet")
+    hi = mise_max if mise_max is not None else await eco_cfg(gid, "max_bet")
+    if lo > hi:
+        return await interaction.response.send_message("🚫 La mise minimum dépasse la mise maximum.", ephemeral=True)
+    if actif is not None:
+        await set_flag(gid, "eco", actif)
+    for key, val in (("start", depart), ("daily", daily), ("min_bet", mise_min), ("max_bet", mise_max)):
+        if val is not None:
+            await set_setting(gid, f"eco_{key}", str(val))
+    await interaction.response.send_message(embed=await eco_panel_embed(interaction.guild), ephemeral=True)
+
+
+@eco_group.command(name="donner", description="Donne des pièces à un membre")
+@app_commands.describe(membre="Le membre", montant="Combien")
+@admin_only
+async def eco_give(interaction: discord.Interaction, membre: discord.Member, montant: app_commands.Range[int, 1, ECO_MAX]):
+    if membre.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de porte-monnaie 🤖", ephemeral=True)
+    await eco_add(interaction.guild_id, membre.id, montant)
+    bal = await eco_balance(interaction.guild_id, membre.id)
+    await interaction.response.send_message(f"✅ +{montant} {COIN} pour {membre.mention} (solde : {bal}).", ephemeral=True)
+
+
+@eco_group.command(name="retirer", description="Retire des pièces à un membre")
+@app_commands.describe(membre="Le membre", montant="Combien")
+@admin_only
+async def eco_take(interaction: discord.Interaction, membre: discord.Member, montant: app_commands.Range[int, 1, ECO_MAX]):
+    if membre.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de porte-monnaie 🤖", ephemeral=True)
+    await eco_remove(interaction.guild_id, membre.id, montant)
+    bal = await eco_balance(interaction.guild_id, membre.id)
+    await interaction.response.send_message(f"✅ −{montant} {COIN} pour {membre.mention} (solde : {bal}).", ephemeral=True)
+
+
+@eco_group.command(name="reset", description="Remet un membre au solde de départ")
+@app_commands.describe(membre="Le membre")
+@admin_only
+async def eco_reset(interaction: discord.Interaction, membre: discord.Member):
+    start = await eco_cfg(interaction.guild_id, "start")
+    await eco_balance(interaction.guild_id, membre.id)
+    await db_run("UPDATE economy SET balance=? WHERE guild_id=? AND user_id=?", (start, interaction.guild_id, membre.id))
+    await interaction.response.send_message(f"✅ {membre.mention} repart avec {start} {COIN}.", ephemeral=True)
+
+
+bot.tree.add_command(eco_group)
+
+
+# ---------- Panneau admin de l'économie ----------
+async def eco_panel_embed(guild: discord.Guild) -> discord.Embed:
+    gid = guild.id
+    rows = await db_all("SELECT COUNT(*), COALESCE(SUM(balance),0) FROM economy WHERE guild_id=?", (gid,))
+    n, total = rows[0]
+    e = emb("💰 Panel économie", "L'argent du serveur et les mises du blackjack / poker.", COLOR_DARK)
+    e.add_field(name="État", value="🟢 Activée" if await eco_on(gid) else "🔴 Désactivée", inline=True)
+    for key, label in ECO_LABELS.items():
+        e.add_field(name=label, value=f"{await eco_cfg(gid, key)} {COIN}", inline=True)
+    e.add_field(name="📈 En circulation", value=f"{total} {COIN} • {n} joueur(s)", inline=False)
+    e.set_footer(text=f"Panel privé • expire dans 5 min • {BOT_NAME} 🖤")
+    return e
+
+
+class EcoConfigModal(discord.ui.Modal, title="⚙️ Réglages de l'économie"):
+    def __init__(self, panel: "EcoPanel", current: dict):
+        super().__init__(timeout=300)
+        self.panel = panel
+        self.fields: dict[str, discord.ui.TextInput] = {}
+        for key, label in ECO_LABELS.items():
+            ti = discord.ui.TextInput(label=label, default=str(current[key]), max_length=10)
+            self.fields[key] = ti
+            self.add_item(ti)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        vals = {}
+        for key, ti in self.fields.items():
+            raw = ti.value.strip()
+            if not raw.isdigit() or int(raw) > ECO_MAX:
+                return await interaction.response.send_message(f"🔢 « {ECO_LABELS[key]} » : nombre entier invalide.", ephemeral=True)
+            vals[key] = int(raw)
+        if vals["min_bet"] < 1 or vals["min_bet"] > vals["max_bet"]:
+            return await interaction.response.send_message("🔢 La mise minimum doit être ≥ 1 et ≤ à la mise maximum.", ephemeral=True)
+        for key, val in vals.items():
+            await set_setting(interaction.guild_id, f"eco_{key}", str(val))
+        await interaction.response.send_message("✅ Réglages enregistrés.", ephemeral=True)
+        spawn(log_cmd(interaction, "ecopanel › réglages", ", ".join(f"`{k}` : {v}" for k, v in vals.items())))
+        await self.panel.refresh()
+
+
+class EcoAmountModal(discord.ui.Modal):
+    def __init__(self, panel: "EcoPanel", target, give: bool):
+        super().__init__(title=f"{'Donner à' if give else 'Retirer à'} {target.display_name}"[:45], timeout=300)
+        self.panel, self.target, self.give = panel, target, give
+        self.montant = discord.ui.TextInput(label="Montant", max_length=10)
+        self.add_item(self.montant)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.montant.value.strip()
+        if not raw.isdigit() or not 1 <= int(raw) <= ECO_MAX:
+            return await interaction.response.send_message("🔢 Mets un nombre entier positif.", ephemeral=True)
+        amount, gid = int(raw), interaction.guild_id
+        if self.give:
+            await eco_add(gid, self.target.id, amount)
+        else:
+            await eco_remove(gid, self.target.id, amount)
+        bal = await eco_balance(gid, self.target.id)
+        sign = "+" if self.give else "−"
+        await interaction.response.send_message(
+            f"✅ {sign}{amount} {COIN} pour {self.target.mention} (solde : {bal}).", ephemeral=True
+        )
+        spawn(log_cmd(interaction, "ecopanel › " + ("donner" if self.give else "retirer"),
+                      f"`membre` : {self.target.mention}\n`montant` : {amount}"))
+        await self.panel.refresh()
+
+
+class PickEcoMemberView(_OwnerView):
+    def __init__(self, invoker_id: int, give: bool, panel: "EcoPanel"):
+        super().__init__(invoker_id)
+        self.give, self.panel = give, panel
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="👤 Choisis le membre…", min_values=1, max_values=1)
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        m = select.values[0]
+        if getattr(m, "bot", False):
+            return await interaction.response.send_message("Les bots n'ont pas de porte-monnaie 🤖", ephemeral=True)
+        await interaction.response.send_modal(EcoAmountModal(self.panel, m, self.give))
+
+
+class EcoPanel(_OwnerView):
+    def __init__(self, invoker_id: int, guild: discord.Guild):
+        super().__init__(invoker_id)
+        self.timeout = 300
+        self.guild = guild
+        self.origin: Optional[discord.Interaction] = None
+
+    async def refresh(self):
+        if self.origin:
+            try:
+                await self.origin.edit_original_response(embed=await eco_panel_embed(self.guild), view=self)
+            except discord.HTTPException:
+                pass
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.origin:
+            try:
+                await self.origin.edit_original_response(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Activer / désactiver", emoji="🔁", style=discord.ButtonStyle.primary, row=0)
+    async def b_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild_id
+        on = not await eco_on(gid)
+        await set_flag(gid, "eco", on)
+        await interaction.response.edit_message(embed=await eco_panel_embed(interaction.guild), view=self)
+        spawn(log_cmd(interaction, "ecopanel › économie", f"État : {'on' if on else 'off'}"))
+
+    @discord.ui.button(label="Réglages", emoji="⚙️", style=discord.ButtonStyle.secondary, row=0)
+    async def b_cfg(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cur = {k: await eco_cfg(interaction.guild_id, k) for k in ECO_DEFAULTS}
+        await interaction.response.send_modal(EcoConfigModal(self, cur))
+
+    @discord.ui.button(label="Donner", emoji="➕", style=discord.ButtonStyle.success, row=1)
+    async def b_give(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "À qui donner des pièces ?", view=PickEcoMemberView(interaction.user.id, True, self), ephemeral=True
+        )
+
+    @discord.ui.button(label="Retirer", emoji="➖", style=discord.ButtonStyle.danger, row=1)
+    async def b_take(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "À qui retirer des pièces ?", view=PickEcoMemberView(interaction.user.id, False, self), ephemeral=True
+        )
+
+    @discord.ui.button(label="Classement", emoji="💰", style=discord.ButtonStyle.secondary, row=1)
+    async def b_top(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = await db_all(
+            "SELECT user_id, balance FROM economy WHERE guild_id=? ORDER BY balance DESC LIMIT 10", (interaction.guild_id,)
+        )
+        txt = "\n".join(f"`#{i + 1}` <@{u}> — **{b}** {COIN}" for i, (u, b) in enumerate(rows)) or "Personne pour l'instant."
+        await interaction.response.send_message(embed=emb("💰 Top 10", txt, COLOR_PURPLE), ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @discord.ui.button(label="Fermer", emoji="✖️", style=discord.ButtonStyle.secondary, row=2)
+    async def b_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(embed=emb("💰 Panel fermé", "À la prochaine 🖤", COLOR_DARK), view=None)
+
+
+@bot.tree.command(name="ecopanel", description="(admin) Panneau de l'économie et des mises 💰")
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
 @app_commands.checks.has_permissions(administrator=True)
-async def adminpanel(interaction: discord.Interaction):
-    gid = interaction.guild_id
-    states = {k: await get_flag(gid, k, d) for k, _, d in ADMIN_TOGGLES}
-    view = AdminPanel(interaction.user.id, states)
-    await interaction.response.send_message(embed=await admin_panel_embed(interaction.guild), view=view, ephemeral=True)
+async def ecopanel(interaction: discord.Interaction):
+    view = EcoPanel(interaction.user.id, interaction.guild)
+    await interaction.response.send_message(embed=await eco_panel_embed(interaction.guild), view=view, ephemeral=True)
     view.origin = interaction
+
+
+# =====================================================================
+# RÈGLES : /reglepoker, /regleblackjack  +  /main (classement des mains de poker)
+# =====================================================================
+async def _bet_rules(gid: Optional[int]) -> str:
+    if not gid or not await eco_on(gid):
+        return "Les mises sont désactivées sur ce serveur (un admin peut les activer avec `/ecopanel`)."
+    lo, hi = await eco_cfg(gid, "min_bet"), await eco_cfg(gid, "max_bet")
+    return f"Mise optionnelle via `mise:` (de **{lo}** à **{hi}** {COIN}). `mise:0` = partie pour le fun."
+
+
+@bot.tree.command(name="regleblackjack", description="Les règles du blackjack 🃏")
+async def regleblackjack(interaction: discord.Interaction):
+    e = emb("🃏 Règles du blackjack", "Battre Mika sans dépasser **21**.", COLOR_PURPLE)
+    e.add_field(
+        name="🎯 But",
+        value="Avoir une main plus proche de 21 que celle de Mika, sans la dépasser (sinon tu sautes et tu perds).",
+        inline=False,
+    )
+    e.add_field(
+        name="🂡 Valeur des cartes",
+        value="Cartes 2 à 10 : leur valeur • Valet / Dame / Roi : 10 • As : 11 ou 1 (le mieux pour toi).",
+        inline=False,
+    )
+    e.add_field(
+        name="▶️ Déroulé",
+        value=(
+            "Chacun reçoit 2 cartes, Mika en montre une seule.\n"
+            "À ton tour : **Tirer** (une carte de plus) ou **Rester**. À 21 pile, tu restes automatiquement.\n"
+            f"Tu as **{BJ_TURN_TIMEOUT} s** par tour : sinon tu restes (et tu es marqué AFK).\n"
+            "Ensuite Mika tire jusqu'à atteindre **17** minimum."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🏆 Résultat",
+        value=(
+            "Blackjack naturel (As + figure/10 d'entrée) : bat tout, sauf un blackjack de Mika (égalité).\n"
+            "Si Mika saute, tous les joueurs encore en jeu gagnent. Même total = égalité.\n"
+            "Pas de doublement ni de séparation dans cette version."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="💰 Mises",
+        value=(
+            f"{await _bet_rules(interaction.guild_id)}\n"
+            "Victoire : **×2** • Blackjack naturel : **×2,5** • Égalité : mise rendue • Défaite : mise perdue.\n"
+            "À la table, l'hôte fixe la mise : elle est prélevée au lancement."
+        ),
+        inline=False,
+    )
+    e.add_field(name="👥 Modes", value=f"`/blackjack` solo contre Mika, ou table ouverte (jusqu'à {BJ_MAX_PLAYERS} joueurs).", inline=False)
+    await interaction.response.send_message(embed=e)
+
+
+@bot.tree.command(name="reglepoker", description="Les règles du poker 🂡")
+async def reglepoker(interaction: discord.Interaction):
+    e = emb("♠️ Règles du poker (Texas Hold'em simplifié)", "Fais la meilleure main de 5 cartes.", COLOR_PURPLE)
+    e.add_field(
+        name="▶️ Déroulé",
+        value=(
+            "Chaque joueur (et Mika) reçoit 2 cartes privées ; 5 cartes communes sont révélées en 3 temps.\n"
+            "4 tours : **Pré-flop**, **Flop** (3 cartes), **Turn** (4e), **River** (5e).\n"
+            f"À chaque tour : **Suivre** ou **Se coucher** ({PK_TURN_TIMEOUT} s, sinon tu es couché et marqué AFK). "
+            "Avec une mise active, **Relancer** ajoute des pièces au pot (2 relances max par tour) :\n "
+            "tous les autres doivent re-décider (suivre la relance ou se coucher). "
+            "Le bouton **Mes cartes** te montre ta main en privé."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🏁 Abattage",
+        value=(
+            "Il y a abattage après la River : la meilleure combinaison de 5 cartes parmi tes 2 cartes + les 5 communes gagne.\n"
+            "Si tout le monde se couche sauf un, il gagne direct. Mika peut aussi se coucher 😏\n"
+            "Égalité parfaite : le pot est partagé. Voir `/main` pour l'ordre des combinaisons."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="💰 Mises",
+        value=(
+            f"{await _bet_rules(interaction.guild_id)}\n"
+            f"Chaque joueur mise une fois ; **{BOT_NAME} mise autant que les autres** (la maison). "
+            "Le pot est donc `mise × (joueurs + Mika)` : le gagnant le remporte, les gagnants à égalité le partagent. "
+            f"Si c'est Mika qui gagne, elle empoche tout. Main annulée (tout le monde se couche) : mises rendues."
+            "Avec une mise : bouton **Relancer** (2 max par tour)."
+        ),
+        inline=False,
+    )
+    e.add_field(name="👥 Joueurs", value=f"`/poker` : table ouverte, de 1 à {PK_MAX_PLAYERS} joueurs contre Mika.", inline=False)
+    await interaction.response.send_message(embed=e)
+
+
+POKER_EXAMPLES = [  # du plus fort au plus faible (même ordre que PK_HANDS inversé)
+    ("Quinte flush", "A♠ K♠ Q♠ J♠ 10♠", "5 cartes qui se suivent, de la même couleur"),
+    ("Carré", "9♠ 9♥ 9♦ 9♣ K♠", "4 cartes de même valeur"),
+    ("Full", "Q♠ Q♥ Q♦ 7♣ 7♠", "un brelan + une paire"),
+    ("Couleur", "A♥ J♥ 8♥ 5♥ 2♥", "5 cartes de la même couleur"),
+    ("Quinte", "10♠ 9♥ 8♦ 7♣ 6♠", "5 cartes qui se suivent (l'as peut valoir 1 : A-2-3-4-5)"),
+    ("Brelan", "8♠ 8♥ 8♦ K♣ 4♠", "3 cartes de même valeur"),
+    ("Double paire", "J♠ J♥ 4♦ 4♣ A♠", "deux paires"),
+    ("Paire", "10♠ 10♥ A♦ 7♣ 3♠", "2 cartes de même valeur"),
+    ("Carte haute", "A♠ J♥ 8♦ 5♣ 2♠", "rien du tout : la plus haute carte compte"),
+]
+
+
+@bot.tree.command(name="main", description="Le classement des mains de poker, de la meilleure à la pire 🏆")
+async def main_cmd(interaction: discord.Interaction):
+    lines = [
+        f"**{i}. {name}** — `{ex}`\n└ _{desc}_" for i, (name, ex, desc) in enumerate(POKER_EXAMPLES, start=1)
+    ]
+    e = emb("🏆 Les mains au poker", "\n".join(lines), COLOR_PINK)
+    e.add_field(
+        name="⚖️ Départage",
+        value="À combinaison égale, la valeur des cartes décide (ex : paire de rois > paire de dames), puis les cartes restantes.",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=e)
+
+
+# =====================================================================
+# CRÉATION DE SALONS : /creersalon (texte, vocal ou catégorie)
+# =====================================================================
+@bot.tree.command(name="creersalon", description="(staff) Crée un salon texte, vocal ou une catégorie ➕")
+@app_commands.describe(
+    genre="Ce que tu veux créer", nom="Le nom (100 caractères max)",
+    categorie="La catégorie où le ranger (texte / vocal)",
+    prive="Caché pour tout le monde sauf le staff (et le rôle choisi)", role="Rôle qui peut voir le salon si privé",
+    sujet="Description du salon (texte)", limite="Places max (vocal, 0 = illimité)", nsfw="Salon 18+ (texte)",
+)
+@app_commands.choices(genre=[
+    app_commands.Choice(name="💬 Salon texte", value="texte"),
+    app_commands.Choice(name="🔊 Salon vocal", value="vocal"),
+    app_commands.Choice(name="📁 Catégorie", value="categorie"),
+])
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def creersalon(
+    interaction: discord.Interaction, genre: app_commands.Choice[str], nom: app_commands.Range[str, 1, 100],
+    categorie: Optional[discord.CategoryChannel] = None, prive: bool = False, role: Optional[discord.Role] = None,
+    sujet: Optional[app_commands.Range[str, 1, 1024]] = None, limite: app_commands.Range[int, 0, 99] = 0,
+    nsfw: bool = False,
+):
+    guild = interaction.guild
+    if not guild.me.guild_permissions.manage_channels:
+        return await interaction.response.send_message("🚫 Il me manque la permission « Gérer les salons ».", ephemeral=True)
+    if len(guild.channels) >= 500:
+        return await interaction.response.send_message("🚫 Le serveur a atteint la limite de 500 salons.", ephemeral=True)
+    ow: dict = {}
+    if prive:
+        ow[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+        ow[guild.me] = discord.PermissionOverwrite(view_channel=True)
+        if role is not None and not role.is_default():
+            ow[role] = discord.PermissionOverwrite(view_channel=True)
+    reason = f"/creersalon par {interaction.user}"[:500]
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        if genre.value == "texte":
+            ch = await guild.create_text_channel(
+                nom, category=categorie, topic=sujet, nsfw=nsfw, overwrites=ow, reason=reason
+            )
+        elif genre.value == "vocal":
+            ch = await guild.create_voice_channel(
+                nom, category=categorie, user_limit=limite, overwrites=ow, reason=reason
+            )
+        else:
+            ch = await guild.create_category(nom, overwrites=ow, reason=reason)
+    except discord.Forbidden:
+        return await interaction.followup.send("🚫 Discord me refuse ça : vérifie mes permissions.", ephemeral=True)
+    except discord.HTTPException as e:
+        log.warning("/creersalon : %s", e)
+        return await interaction.followup.send(f"😅 Discord a refusé : {str(e.text)[:150]}", ephemeral=True)
+    lock = " 🔒" if prive else ""
+    await interaction.followup.send(f"✅ Créé : {ch.mention}{lock}", ephemeral=True)
+
+
+# =====================================================================
+# /info : statistiques du serveur
+# =====================================================================
+@bot.tree.command(name="info", description="Les stats du serveur 📊")
+@app_commands.guild_only()
+async def info(interaction: discord.Interaction):
+    g = interaction.guild
+    bots = sum(1 for m in g.members if m.bot)
+    humans = (g.member_count or len(g.members)) - bots
+    online = sum(1 for m in g.members if not m.bot and m.status != discord.Status.offline)
+    e = emb(f"📊 {g.name}", g.description, COLOR_PURPLE)
+    if g.icon:
+        e.set_thumbnail(url=g.icon.url)
+    if g.banner:
+        e.set_image(url=g.banner.url)
+    e.add_field(name="👑 Propriétaire", value=f"<@{g.owner_id}>", inline=True)
+    e.add_field(name="📅 Créé", value=f"<t:{int(g.created_at.timestamp())}:D>\n<t:{int(g.created_at.timestamp())}:R>", inline=True)
+    e.add_field(name="🆔 ID", value=f"`{g.id}`", inline=True)
+    e.add_field(name="👥 Membres", value=f"**{humans}** humains • **{bots}** bots\n🟢 {online} en ligne", inline=True)
+    e.add_field(
+        name="📺 Salons",
+        value=(
+            f"💬 {len(g.text_channels)} texte • 🔊 {len(g.voice_channels)} vocal\n"
+            f"📁 {len(g.categories)} catégories • 🧵 {len(g.forums)} forums"
+        ),
+        inline=True,
+    )
+    e.add_field(name="🎭 Rôles", value=str(max(len(g.roles) - 1, 0)), inline=True)
+    e.add_field(name="😀 Emojis", value=f"{len(g.emojis)}/{g.emoji_limit}", inline=True)
+    e.add_field(name="🚀 Boosts", value=f"Niveau {g.premium_tier} • {g.premium_subscription_count} boost(s)", inline=True)
+    e.add_field(name="🛡️ Vérification", value=str(g.verification_level).replace("_", " ").capitalize(), inline=True)
+    if await eco_on(g.id):
+        rows = await db_all("SELECT COUNT(*), COALESCE(SUM(balance),0) FROM economy WHERE guild_id=?", (g.id,))
+        e.add_field(name="💰 Économie", value=f"{rows[0][1]} {COIN} • {rows[0][0]} joueur(s)", inline=True)
+    if await get_flag(g.id, "automod", False):
+        e.add_field(name="🤖 Auto-modération", value="Activée", inline=True)
+    await interaction.response.send_message(embed=e)
+
+
+# =====================================================================
+# /creeserveur : l'IA conçoit un serveur complet (rôles, catégories, salons, permissions)
+#   Sécurité : aperçu + confirmation obligatoires, rien n'est supprimé, aucun rôle Administrateur n'est créé.
+# =====================================================================
+def _perm(**kw) -> discord.Permissions:
+    return discord.Permissions(**kw)
+
+
+_BASE_PERMS = dict(
+    view_channel=True, send_messages=True, read_message_history=True, add_reactions=True, embed_links=True,
+    attach_files=True, use_external_emojis=True, connect=True, speak=True, use_voice_activation=True,
+    change_nickname=True,
+)
+ROLE_PRESETS = {
+    "membre": _perm(**_BASE_PERMS),
+    "vip": _perm(**_BASE_PERMS, create_public_threads=True),
+    "staff": _perm(
+        **_BASE_PERMS, manage_messages=True, kick_members=True, moderate_members=True, mute_members=True,
+        deafen_members=True, move_members=True, manage_nicknames=True,
+    ),
+    "muet": _perm(view_channel=True, read_message_history=True),
+}
+CREESERVEUR_SYSTEM = (
+    "Tu es un architecte de serveurs Discord expérimenté. Tu réponds uniquement en JSON valide, sans texte autour."
+)
+ACCES = {"public", "lecture", "staff", "roles"}
+
+
+def _clean_name(s, maxlen: int = 100) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()[:maxlen]
+
+
+def normalize_plan(data: dict, max_channels: int, max_roles: int) -> dict:
+    """Nettoie / borne le plan renvoyé par l'IA (on ne lui fait jamais confiance aveuglément)."""
+    roles, seen = [], set()
+    for r in (data.get("roles") or [])[:max_roles]:
+        if not isinstance(r, dict):
+            continue
+        name = _clean_name(r.get("nom"))
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        preset = str(r.get("permissions", "membre")).lower()
+        if preset not in ROLE_PRESETS:
+            preset = "membre"
+        hexa = str(r.get("couleur", "")).lstrip("#")
+        try:
+            color = int(hexa, 16) if len(hexa) == 6 else 0
+        except ValueError:
+            color = 0
+        roles.append({"nom": name, "couleur": color, "preset": preset, "affiche": bool(r.get("affiche", preset == "staff"))})
+    cats, total = [], 0
+    for c in (data.get("categories") or [])[:10]:
+        if not isinstance(c, dict):
+            continue
+        chans = []
+        for s in c.get("salons") or []:
+            if total >= max_channels:
+                break
+            if not isinstance(s, dict):
+                continue
+            name = _clean_name(s.get("nom"))
+            if not name:
+                continue
+            kind = "vocal" if str(s.get("type", "texte")).lower().startswith("voc") else "texte"
+            acces = str(s.get("acces", "public")).lower()
+            if acces not in ACCES:
+                acces = "public"
+            if kind == "texte":
+                name = name.lower().replace(" ", "-")
+            chans.append({
+                "nom": name, "type": kind, "acces": acces,
+                "sujet": _clean_name(s.get("sujet"), 200) if kind == "texte" else "",
+                "roles": [_clean_name(x, 100) for x in (s.get("roles") or []) if isinstance(x, str)][:5],
+            })
+            total += 1
+        if chans:
+            cats.append({"nom": _clean_name(c.get("nom")) or "Salons", "salons": chans})
+    if not cats:
+        raise ValueError("plan vide")
+    return {"roles": roles, "categories": cats, "total": total}
+
+
+def plan_embed(plan: dict, theme: str) -> discord.Embed:
+    e = emb(
+        "🏗️ Aperçu du serveur",
+        f"Thème : **{theme[:100]}**\n{len(plan['roles'])} rôle(s) • {plan['total']} salon(s) • "
+        f"{len(plan['categories'])} catégorie(s)\n\n**Rien n'est créé tant que tu n'as pas confirmé.** "
+        "Rien n'est supprimé non plus.",
+        COLOR_PINK,
+    )
+    if plan["roles"]:
+        txt = "\n".join(f"• **{r['nom']}** — {r['preset']}" for r in plan["roles"])
+        e.add_field(name="🎭 Rôles", value=txt[:1024], inline=False)
+    for c in plan["categories"][:10]:
+        lines = []
+        for s in c["salons"]:
+            icon = "🔊" if s["type"] == "vocal" else "💬"
+            tag = "🔒" if s["acces"] in ("staff", "roles") else "📖" if s["acces"] == "lecture" else ""
+            lines.append(f"{icon}{tag} {s['nom']}")
+        e.add_field(name=f"📁 {c['nom']}"[:256], value="\n".join(lines)[:1024], inline=True)
+    e.set_footer(text="💬 texte • 🔊 vocal • 🔒 privé • 📖 lecture seule")
+    return e
+
+
+def build_overwrites(guild, acces, kind, staff_roles, listed) -> dict:
+    ow: dict = {}
+    if acces == "public":
+        return ow
+    if acces == "lecture":
+        if kind == "texte":
+            ow[guild.default_role] = discord.PermissionOverwrite(send_messages=False, create_public_threads=False)
+            for r in staff_roles:
+                ow[r] = discord.PermissionOverwrite(send_messages=True)
+        return ow
+    ow[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+    for r in (staff_roles if acces == "staff" else listed):
+        ow[r] = discord.PermissionOverwrite(view_channel=True)
+    if guild.me:
+        ow[guild.me] = discord.PermissionOverwrite(view_channel=True)
+    return ow
+
+
+async def build_server(guild: discord.Guild, plan: dict, invoker: discord.abc.User, stats: dict):
+    """Crée rôles, catégories et salons. `stats` est mis à jour au fil de l'eau (Forbidden remonte à l'appelant)."""
+    reason = f"/creeserveur par {invoker}"[:500]
+    by_name = {r.name.lower(): r for r in guild.roles if not r.is_default()}
+    staff_roles = []
+    for r in plan["roles"]:
+        role = by_name.get(r["nom"].lower())
+        if role is None:
+            kw = dict(name=r["nom"], colour=discord.Colour(r["couleur"]), hoist=r["affiche"], mentionable=False, reason=reason)
+            try:
+                role = await guild.create_role(permissions=ROLE_PRESETS[r["preset"]], **kw)
+            except discord.Forbidden:  # je n'ai pas moi-même ces permissions : on crée le rôle sans permissions
+                role = await guild.create_role(permissions=discord.Permissions.none(), **kw)
+                stats["errors"].append(f"Rôle « {r['nom']} » créé sans permissions (il me les manque).")
+            stats["roles"] += 1
+            by_name[r["nom"].lower()] = role
+            await asyncio.sleep(0.3)
+        if r["preset"] == "staff":
+            staff_roles.append(role)
+    for c in plan["categories"]:
+        try:
+            cat = await guild.create_category(c["nom"], reason=reason)
+        except discord.Forbidden:
+            raise
+        except discord.HTTPException as e:
+            stats["errors"].append(f"Catégorie « {c['nom']} » : {str(e.text)[:60]}")
+            continue
+        stats["cats"] += 1
+        await asyncio.sleep(0.3)
+        for s in c["salons"]:
+            listed = [by_name[x.lower()] for x in s["roles"] if x.lower() in by_name]
+            ow = build_overwrites(guild, s["acces"], s["type"], staff_roles, listed)
+            try:
+                if s["type"] == "vocal":
+                    await guild.create_voice_channel(s["nom"], category=cat, overwrites=ow, reason=reason)
+                else:
+                    await guild.create_text_channel(
+                        s["nom"], category=cat, topic=s["sujet"] or None, overwrites=ow, reason=reason
+                    )
+                stats["chans"] += 1
+            except discord.Forbidden:
+                raise
+            except discord.HTTPException as e:
+                stats["errors"].append(f"Salon « {s['nom']} » : {str(e.text)[:60]}")
+            await asyncio.sleep(0.3)
+
+
+class ServerPlanView(discord.ui.View):
+    def __init__(self, invoker_id: int, plan: dict, theme: str):
+        super().__init__(timeout=180)
+        self.invoker_id, self.plan, self.theme = invoker_id, plan, theme
+        self.running = False
+        self.origin: Optional[discord.Interaction] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message("Ce menu n'est pas pour toi 😏", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self.running or not self.origin:
+            return
+        try:
+            await self.origin.edit_original_response(
+                embed=emb("⌛ Aperçu expiré", "Relance `/creeserveur` si tu veux réessayer.", COLOR_DARK), view=None
+            )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Créer le serveur", emoji="✅", style=discord.ButtonStyle.success)
+    async def ok(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.running:
+            return await interaction.response.send_message("C'est déjà en cours 😏", ephemeral=True)
+        self.running = True
+        self.stop()
+        await interaction.response.edit_message(
+            embed=emb("⏳ Construction en cours…", "Je crée les rôles et les salons, ça peut prendre une minute.", COLOR_PURPLE),
+            view=None,
+        )
+        guild = interaction.guild
+        stats = {"roles": 0, "cats": 0, "chans": 0, "errors": []}
+        try:
+            await build_server(guild, self.plan, interaction.user, stats)
+        except discord.Forbidden:
+            stats["errors"].append("Permissions manquantes (« Gérer les salons » / « Gérer les rôles ») : construction interrompue.")
+        except Exception:  # noqa: BLE001
+            log.exception("/creeserveur")
+            stats["errors"].append("Erreur inattendue : construction interrompue.")
+        desc = f"🎭 **{stats['roles']}** rôle(s) • 📁 **{stats['cats']}** catégorie(s) • 💬 **{stats['chans']}** salon(s) créés."
+        if stats["errors"]:
+            desc += "\n\n⚠️ " + "\n⚠️ ".join(stats["errors"][:6])
+        done = emb("🏗️ Serveur construit" if not stats["errors"] else "🏗️ Construction terminée (avec réserves)", desc, COLOR_PINK)
+        try:
+            await interaction.edit_original_response(embed=done, view=None)
+        except discord.HTTPException:
+            pass
+        le = discord.Embed(title="🏗️ /creeserveur", color=COLOR_PURPLE)
+        le.add_field(name="Admin", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+        le.add_field(name="Thème", value=self.theme[:200], inline=True)
+        le.add_field(name="Résultat", value=desc[:1000], inline=False)
+        le.timestamp = discord.utils.utcnow()
+        await mod_log(guild, le)
+
+    @discord.ui.button(label="Annuler", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(embed=emb("✖️ Annulé", "Rien n'a été créé.", COLOR_DARK), view=None)
+
+
+@bot.tree.command(name="creeserveur", description="(admin) L'IA génère un serveur complet : rôles, salons, permissions 🏗️")
+@app_commands.describe(
+    theme="L'ambiance / le thème (ex : serveur gaming FR, communauté d'artistes, serveur d'étude…)",
+    salons="Nombre de salons à créer (5 à 40)", roles="Nombre de rôles à créer (1 à 12)",
+)
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+@ai_cd()
+async def creeserveur(
+    interaction: discord.Interaction, theme: app_commands.Range[str, 3, 200],
+    salons: app_commands.Range[int, 5, 40] = 15, roles: app_commands.Range[int, 1, 12] = 5,
+):
+    guild = interaction.guild
+    mp = guild.me.guild_permissions
+    if not (mp.manage_channels and mp.manage_roles):
+        return await interaction.response.send_message(
+            "🚫 Il me faut « Gérer les salons » et « Gérer les rôles » pour construire un serveur.", ephemeral=True
+        )
+    if len(guild.channels) + salons + 10 > 500 or len(guild.roles) + roles > 250:
+        return await interaction.response.send_message("🚫 Pas assez de place sur ce serveur (limites Discord).", ephemeral=True)
+    prompt = (
+        f"Conçois la structure d'un serveur Discord sur le thème : {theme}.\n"
+        f"Contraintes : exactement {roles} rôles et environ {salons} salons au total (texte + vocal), répartis dans "
+        "3 à 8 catégories logiques (accueil, discussion, vocal, staff…). Noms courts, en français, avec un emoji au "
+        "début des catégories si ça colle au thème. Noms de salons texte en minuscules avec des tirets.\n"
+        'Rôles : "permissions" ∈ membre | vip | staff | muet ; "couleur" au format #RRGGBB.\n'
+        'Salons : "type" ∈ texte | vocal ; "acces" ∈ public | lecture | staff | roles '
+        '("lecture" = tout le monde lit mais seul le staff écrit ; "roles" = réservé aux rôles listés dans "roles").\n'
+        "Prévois un salon de règles en lecture seule, et un salon réservé au staff s'il y a un rôle staff.\n"
+        'JSON attendu : {"roles":[{"nom":"","couleur":"#RRGGBB","permissions":"membre","affiche":false}],'
+        '"categories":[{"nom":"","salons":[{"nom":"","type":"texte","sujet":"max 80 caractères","acces":"public","roles":[]}]}]}'
+    )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        data = await ask_json(prompt, system=CREESERVEUR_SYSTEM, max_tokens=4500)
+        plan = normalize_plan(data, salons, roles)
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e), ephemeral=True)
+    view = ServerPlanView(interaction.user.id, plan, theme)
+    await interaction.followup.send(embed=plan_embed(plan, theme), view=view, ephemeral=True)
+    view.origin = interaction
+
+
+# =====================================================================
+# AUTO-MODÉRATION : suppression automatique + sanctions progressives (activables / désactivables)
+#   /automod config|mot|pardon  (ou le bouton « Auto-modération » du /adminpanel)
+#   Le staff (admin, gérer les messages, exclure des membres) n'est jamais sanctionné.
+# =====================================================================
+AM_RULES = [  # (clé du réglage, libellé, valeur par défaut)
+    ("am_spam", "Anti-spam (5 messages en 6 s)", True),
+    ("am_liens", "Invitations Discord", True),
+    ("am_mentions", "Mentions de masse (5+)", True),
+    ("am_majuscules", "Majuscules abusives", False),
+    ("am_mots", "Mots interdits", True),
+    ("am_insulte_bot", "Insultes envers le bot", True),
+]
+AM_LADDER = [0, 0, 5, 30, 360]  # minutes de mute selon le n° d'infraction (1 = avertissement seulement)
+AM_DECAY = 24 * 3600            # les infractions sont remises à zéro après 24 h sans récidive
+AM_MAX_WORDS = 100
+INVITE_RE = re.compile(r"(?:discord\.gg|discord(?:app)?\.com/invite|dsc\.gg)/[\w-]+", re.I)
+_am_hist: dict = defaultdict(lambda: deque(maxlen=8))
+
+# ---------- Insultes envers le bot ----------
+_BOT_INSULTS_STRONG = (
+    "connard", "connasse", "salope", "pute", "encule", "enculee", "fdp", "ntm", "nique", "tg", "batard", "batarde",
+    "abruti", "abrutie", "cretin", "cretine", "ordure", "bouffon", "bouffonne", "pouffiasse", "garce", "tocard",
+    "tocarde", "ferme ta gueule", "ta gueule", "va te faire foutre", "va te faire enculer", "va chier",
+    "bot de merde", "sale bot", "sous merde", "merdique", "degueulasse",
+)
+BOT_INSULT_STRONG_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_BOT_INSULTS_STRONG, key=len, reverse=True)) + r")\b"
+)
+BOT_INSULT_SOFT_RE = re.compile(
+    r"\b(?:t es|tu es|tu)\s+(?:(?:vraiment|trop|tellement|completement|si|bien|super)\s+)?"
+    r"(?:nul|nulle|naze|inutile|pourri|pourrie|debile|stupide|idiot|idiote|bete|con|conne)\b"
+)
+BOT_ADDRESS_RE = re.compile(r"\b(?:ce|le|ton|cette|la|sale|espece de) bot\b")
+
+
+def insults_bot(message: discord.Message) -> bool:
+    t = plain(message.content)
+    if not t:
+        return False
+    if any(u.id != bot.user.id for u in message.mentions):  # vise sans doute quelqu'un d'autre
+        return False
+    addressed = (
+        bot.user in message.mentions or is_reply_to_bot(message)
+        or name_called(message.content) or bool(BOT_ADDRESS_RE.search(t))
+    )
+    return addressed and bool(BOT_INSULT_STRONG_RE.search(t) or BOT_INSULT_SOFT_RE.search(t))
+
+
+async def am_words(gid: int) -> list[str]:
+    try:
+        data = json.loads(await get_setting(gid, "automod_words", "[]"))
+        return [str(w) for w in data] if isinstance(data, list) else []
+    except ValueError:
+        return []
+
+
+async def am_detect(message: discord.Message) -> Optional[str]:
+    gid, c = message.guild.id, message.content
+    if await get_flag(gid, "am_spam", True):
+        dq = _am_hist[(gid, message.author.id)]
+        now = time.time()
+        dq.append(now)
+        if len(dq) >= 5 and now - dq[-5] <= 6:
+            dq.clear()
+            return "spam"
+    if await get_flag(gid, "am_liens", True) and INVITE_RE.search(c):
+        return "invitation Discord"
+    if await get_flag(gid, "am_mentions", True) and (
+        len(message.mentions) + len(message.role_mentions) >= 5 or message.mention_everyone
+    ):
+        return "mentions de masse"
+    if await get_flag(gid, "am_majuscules", False):
+        letters = [ch for ch in c if ch.isalpha()]
+        if len(letters) >= 15 and sum(ch.isupper() for ch in letters) / len(letters) > 0.7:
+            return "trop de majuscules"
+            
+    if await get_flag(gid, "am_insulte_bot", True) and insults_bot(message):
+        return "insulte envers le bot"
+        
+    if await get_flag(gid, "am_mots", True):
+        words = await am_words(gid)
+        if words:
+            t = f" {plain(c)} "
+            if any(plain(w) and f" {plain(w)} " in t for w in words):
+                return "mot interdit"
+    return None
+
+
+async def automod_check(message: discord.Message) -> bool:
+    """True si le message a été traité (donc inutile de continuer à le lire)."""
+    g, m = message.guild, message.author
+    if g is None or not isinstance(m, discord.Member) or not await get_flag(g.id, "automod", False):
+        return False
+    p = m.guild_permissions
+    if p.administrator or p.manage_messages or p.moderate_members:
+        return False
+    try:
+        reason = await am_detect(message)
+    except Exception:  # noqa: BLE001
+        log.exception("automod : détection")
+        return False
+    if not reason:
+        return False
+    try:
+        await message.delete()
+        deleted = True
+    except discord.HTTPException:
+        deleted = False
+
+    now = int(time.time())
+    rows = await db_all("SELECT strikes, last_at FROM automod_strikes WHERE guild_id=? AND user_id=?", (g.id, m.id))
+    strikes = (rows[0][0] if rows and now - rows[0][1] < AM_DECAY else 0) + 1
+    await db_run(
+        "INSERT INTO automod_strikes(guild_id,user_id,strikes,last_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(guild_id,user_id) DO UPDATE SET strikes=excluded.strikes, last_at=excluded.last_at",
+        (g.id, m.id, strikes, now),
+    )
+    minutes = AM_LADDER[min(strikes, len(AM_LADDER) - 1)] if await get_flag(g.id, "automod_sanctions", True) else 0
+    sanction = f"Avertissement n°{strikes}"
+    if minutes:
+        me = g.me
+        if (me and m.top_role >= me.top_role) or m.id == g.owner_id:
+            sanction = f"Infraction n°{strikes} (mute impossible : hiérarchie des rôles)"
+        else:
+            try:
+                await m.timeout(timedelta(minutes=minutes), reason=f"Auto-modération : {reason}")
+                sanction = f"Infraction n°{strikes} • mute **{fmt_duration(minutes)}**"
+            except discord.HTTPException:
+                sanction = f"Infraction n°{strikes} (mute impossible : permissions)"
+                
+    if reason == "insulte envers le bot":
+        text = f"{m.mention}, on ne parle pas comme ça à mommy 😈\n{sanction}. Sois poli(e) 🖤"
+    else:
+        text = f"{m.mention}, mommy a tout vu : **{reason}**.\n{sanction}. Sois sage 🖤"
+    ann = discord.Embed(title="🛡️ Auto-modération", description=text, color=0xFFB347)
+    try:
+        await message.channel.send(embed=ann, allowed_mentions=USER_PINGS, delete_after=15)
+    except discord.HTTPException:
+        pass
+    le = discord.Embed(title="🛡️ Auto-modération", color=0xFFB347)
+    le.set_thumbnail(url=m.display_avatar.url)
+    le.add_field(name="Membre", value=f"{m.mention} (`{m.id}`)", inline=True)
+    le.add_field(name="Salon", value=getattr(message.channel, "mention", "—"), inline=True)
+    le.add_field(name="Motif", value=reason, inline=True)
+    le.add_field(name="Sanction", value=sanction, inline=False)
+    le.add_field(name="Message supprimé", value="Oui" if deleted else "Non (permission manquante)", inline=True)
+    if reason != "mot interdit" and message.content:
+        le.add_field(name="Contenu", value=message.content[:500], inline=False)
+    le.timestamp = discord.utils.utcnow()
+    await mod_log(g, le)
+    return True
+
+
+async def automod_embed(gid: int) -> discord.Embed:
+    on = await get_flag(gid, "automod", False)
+    sanc = await get_flag(gid, "automod_sanctions", True)
+    e = emb(
+        "🛡️ Auto-modération",
+        f"État : **{'🟢 activée' if on else '🔴 désactivée'}**\n"
+        f"Sanctions automatiques : **{'oui (mute progressif)' if sanc else 'non (suppression + avertissement)'}**",
+        COLOR_DARK,
+    )
+    lines = [f"{'✅' if await get_flag(gid, k, d) else '❌'} {label}" for k, label, d in AM_RULES]
+    e.add_field(name="Règles", value="\n".join(lines), inline=False)
+    e.add_field(
+        name="📈 Échelle des sanctions",
+        value="1ʳᵉ infraction : avertissement • 2ᵉ : mute 5 min • 3ᵉ : mute 30 min • 4ᵉ et + : mute 6 h\n"
+              "Remise à zéro après 24 h sans récidive. Jamais de kick / ban automatique.",
+        inline=False,
+    )
+    e.add_field(name="🚫 Mots interdits", value=f"{len(await am_words(gid))} mot(s) — gérés avec `/automod mot`", inline=False)
+    return e
+
+
+automod_group = app_commands.Group(
+    name="automod", description="(admin) Auto-modération 🛡️",
+    guild_only=True, default_permissions=discord.Permissions(administrator=True),
+)
+
+
+@automod_group.command(name="config", description="Active / règle l'auto-modération")
+@app_commands.describe(
+    actif="Activer / désactiver l'auto-modération",
+    sanctions="Sanctions automatiques (mute progressif). Sinon : suppression + avertissement seulement",
+    spam="Anti-spam", liens="Invitations Discord", mentions="Mentions de masse",
+    majuscules="Majuscules abusives", mots="Mots interdits", insultes_bot="Insultes envers le bot",
+)
+@admin_only
+async def automod_config(
+    interaction: discord.Interaction, actif: Optional[bool] = None, sanctions: Optional[bool] = None,
+    spam: Optional[bool] = None, liens: Optional[bool] = None, mentions: Optional[bool] = None,
+    majuscules: Optional[bool] = None, mots: Optional[bool] = None, insultes_bot: Optional[bool] = None,
+):
+    gid = interaction.guild_id
+    for key, val in (
+        ("automod", actif), ("automod_sanctions", sanctions), ("am_spam", spam), ("am_liens", liens),
+        ("am_mentions", mentions), ("am_majuscules", majuscules), ("am_mots", mots),
+        ("am_insulte_bot", insultes_bot),
+    ):
+        if val is not None:
+            await set_flag(gid, key, val)
+    await interaction.response.send_message(embed=await automod_embed(gid), ephemeral=True)
+
+
+@automod_group.command(name="mot", description="Gère la liste des mots interdits")
+@app_commands.describe(action="Ajouter, retirer ou lister", mot="Le mot ou l'expression (pour ajouter / retirer)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="➕ Ajouter", value="ajouter"),
+    app_commands.Choice(name="➖ Retirer", value="retirer"),
+    app_commands.Choice(name="📋 Lister", value="liste"),
+])
+@admin_only
+async def automod_word(
+    interaction: discord.Interaction, action: app_commands.Choice[str], mot: Optional[app_commands.Range[str, 2, 40]] = None
+):
+    gid = interaction.guild_id
+    words = await am_words(gid)
+    if action.value == "liste":
+        txt = ", ".join(f"||{w}||" for w in words) or "Aucun mot interdit."
+        return await interaction.response.send_message(f"🚫 **Mots interdits** : {txt}"[:1900], ephemeral=True)
+    if not mot or not plain(mot):
+        return await interaction.response.send_message("Donne un mot (`mot:`).", ephemeral=True)
+    key = plain(mot)
+    if action.value == "ajouter":
+        if any(plain(w) == key for w in words):
+            return await interaction.response.send_message("Déjà dans la liste 😏", ephemeral=True)
+        if len(words) >= AM_MAX_WORDS:
+            return await interaction.response.send_message(f"Liste pleine ({AM_MAX_WORDS} max).", ephemeral=True)
+        words.append(mot.strip())
+        msg = f"✅ Ajouté : ||{mot.strip()}||"
+    else:
+        rest = [w for w in words if plain(w) != key]
+        if len(rest) == len(words):
+            return await interaction.response.send_message("Ce mot n'est pas dans la liste.", ephemeral=True)
+        words, msg = rest, "✅ Retiré."
+    await set_setting(gid, "automod_words", json.dumps(words, ensure_ascii=False))
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@automod_group.command(name="pardon", description="Remet à zéro les infractions d'un membre")
+@app_commands.describe(membre="Le membre à pardonner")
+@admin_only
+async def automod_pardon(interaction: discord.Interaction, membre: discord.Member):
+    await db_run("DELETE FROM automod_strikes WHERE guild_id=? AND user_id=?", (interaction.guild_id, membre.id))
+    await interaction.response.send_message(f"🕊️ Infractions de {membre.mention} effacées.", ephemeral=True)
+
+
+@automod_group.command(name="statut", description="Affiche l'état de l'auto-modération")
+@admin_only
+async def automod_status(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=await automod_embed(interaction.guild_id), ephemeral=True)
+
+
+bot.tree.add_command(automod_group)
+
+
+# =====================================================================
+# NOUVEAUTÉS : /optimiser • /dev • /bienvenue • /sondage • /ticket • /annonce • /purge
+#   Tout est persistant (boutons actifs après un redémarrage) et tracé dans le salon de /logs.
+# =====================================================================
+BOOT_TIME = time.time()
+
+
+async def get_int(gid: Optional[int], key: str) -> int:
+    """Réglage numérique (id de salon, de rôle...) ; 0 si absent ou invalide."""
+    try:
+        return int(await get_setting(gid, key, "0") or 0)
+    except ValueError:
+        return 0
+
+
+class SafeModal(discord.ui.Modal):
+    """Modal qui prévient l'utilisateur au lieu de planter en silence."""
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error("Erreur de modal", exc_info=error)
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        try:
+            await send("😅 Y'a eu un bug, réessaie.", ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+# =====================================================================
+# ⚡ /optimiser : analyse des performances + propositions d'améliorations
+# =====================================================================
+def fmt_uptime(sec: float) -> str:
+    d, r = divmod(int(sec), 86400)
+    h, r = divmod(r, 3600)
+    parts = [f"{d} j" if d else "", f"{h} h" if h else "", f"{r // 60} min"]
+    return " ".join(p for p in parts if p)
+
+
+def mem_mb() -> Optional[float]:
+    """Mémoire utilisée par le bot (psutil si dispo, sinon resource ; None si impossible, ex. Windows)."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1048576
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import resource
+        import sys
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak / (1048576 if sys.platform == "darwin" else 1024)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def db_size_mb() -> float:
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(DB_PATH + suffix)
+        except OSError:
+            pass
+    return total / 1048576
+
+
+def cache_entries() -> int:
+    return len(_settings) + len(last_chat) + len(last_react) + len(last_spont) + len(last_weather) + len(last_greet)
+
+
+def prune_caches(max_age: float = 3600) -> int:
+    """Retire des caches anti-spam les entrées inactives depuis plus de max_age secondes."""
+    now, removed = time.time(), 0
+    for d in (last_chat, last_react, last_spont, last_weather, last_greet):
+        for k in [k for k, t in d.items() if now - t > max_age]:
+            del d[k]
+            removed += 1
+    return removed
+
+
+PERF_TABLES = ("history", "custom_cmds", "game_stats", "polls", "poll_votes", "tickets", "automod_strikes")
+
+
+async def perf_metrics(test_ai: bool) -> dict:
+    m: dict = {
+        "ws_ms": bot.latency * 1000,
+        "uptime": time.time() - BOOT_TIME,
+        "guilds": len(bot.guilds),
+        "members": sum(g.member_count or 0 for g in bot.guilds),
+        "mem_mb": mem_mb(),
+        "db_mb": db_size_mb(),
+        "cache": cache_entries(),
+        "tasks": len(_bg),
+        "rows": {},
+    }
+    t0 = time.perf_counter()
+    for table in PERF_TABLES:  # noms constants : pas d'injection possible
+        m["rows"][table] = (await db_all(f"SELECT COUNT(*) FROM {table}"))[0][0]
+    m["db_ms"] = (time.perf_counter() - t0) * 1000 / len(PERF_TABLES)
+    if test_ai:
+        t0 = time.perf_counter()
+        try:
+            await ask_ai([{"role": "user", "content": "Réponds juste : ok"}], system="Réponds en un mot.",
+                         max_tokens=64, temperature=0)
+            m["ai_ms"] = (time.perf_counter() - t0) * 1000
+        except Exception as e:  # noqa: BLE001
+            m["ai_err"] = type(e).__name__
+    return m
+
+
+def perf_advice(m: dict) -> list[str]:
+    out: list[str] = []
+    if m["ws_ms"] > 250:
+        out.append(f"📡 Latence websocket élevée ({m['ws_ms']:.0f} ms) : héberge le bot plus près des serveurs Discord ou vérifie le réseau.")
+    if m.get("db_ms", 0) > 30:
+        out.append(f"🗄️ La base répond lentement ({m['db_ms']:.0f} ms/requête) : utilise un disque SSD et lance « Optimiser la base ».")
+    if m.get("ai_ms", 0) > 6000:
+        out.append(f"🤖 L'IA met {m['ai_ms'] / 1000:.1f} s à répondre : choisis un modèle plus léger via `AI_MODEL`.")
+    if m.get("ai_err"):
+        out.append(f"🤖 Le test IA a échoué ({m['ai_err']}) : vérifie `AI_API_KEY`, `AI_BASE_URL` et ton quota.")
+    if m["db_mb"] > 100:
+        out.append(f"💾 Base volumineuse ({m['db_mb']:.0f} Mo) : « Optimiser la base » compacte le fichier (VACUUM).")
+    if m["mem_mb"] and m["mem_mb"] > 500:
+        out.append(f"🧠 Mémoire élevée ({m['mem_mb']:.0f} Mo) : redémarre le bot de temps en temps ou purge les caches.")
+    if m["cache"] > 5000:
+        out.append(f"🧹 {m['cache']} entrées en cache : « Optimiser la base » purge les entrées inactives.")
+    stale = m["rows"].get("poll_votes", 0) + m["rows"].get("tickets", 0)
+    if stale > 20000:
+        out.append("📦 Beaucoup de votes / tickets archivés : « Optimiser la base » supprime les anciens.")
+    return out
+
+
+async def server_advice(guild: discord.Guild) -> list[str]:
+    gid, out = guild.id, []
+    if not await get_int(gid, "log_channel"):
+        out.append("📜 Aucun salon de logs : active-le avec `/logs` pour tracer sanctions et commandes.")
+    if not await get_flag(gid, "automod", False):
+        out.append("🛡️ Auto-modération coupée : `/automod config actif:True` (spam, invitations, mentions).")
+    if not await get_flag(gid, "welcome_on", False):
+        out.append("👋 Pas de message de bienvenue : `/bienvenue config` ou `/bienvenue generer`.")
+    if not await get_int(gid, "ticket_category"):
+        out.append("🎫 Pas de tickets : `/ticket config` puis `/ticket panel`.")
+    if await get_flag(gid, "spontane", False) and await get_flag(gid, "reactions", True):
+        out.append("⚡ Rebonds spontanés + réactions IA actifs : ça consomme du quota IA, coupe `spontane` si besoin.")
+    perms = guild.me.guild_permissions
+    labels = (("manage_messages", "`/purge`"), ("manage_channels", "les tickets"),
+              ("manage_roles", "les rôles"), ("moderate_members", "les mutes"))
+    missing = [lab for attr, lab in labels if not getattr(perms, attr)]
+    if missing:
+        out.append("🔑 Il me manque des permissions pour : " + ", ".join(missing) + ".")
+    return out
+
+
+def perf_embed(m: dict, advice: list[str]) -> discord.Embed:
+    e = emb("⚡ Analyse des performances", f"Sur **{m['guilds']}** serveur(s) • **{m['members']}** membres", COLOR_PURPLE)
+    lat = f"Websocket **{m['ws_ms']:.0f} ms**\nBase **{m['db_ms']:.1f} ms**/requête"
+    if "ai_ms" in m:
+        lat += f"\nIA **{m['ai_ms'] / 1000:.1f} s**"
+    elif "ai_err" in m:
+        lat += f"\nIA ❌ {m['ai_err']}"
+    e.add_field(name="📡 Latence", value=lat, inline=True)
+    mem = f"{m['mem_mb']:.0f} Mo" if m["mem_mb"] else "n/a"
+    e.add_field(
+        name="🖥️ Ressources",
+        value=f"En ligne depuis **{fmt_uptime(m['uptime'])}**\nRAM **{mem}**\nBase **{m['db_mb']:.1f} Mo**\n"
+              f"Caches **{m['cache']}** • tâches **{m['tasks']}**",
+        inline=True,
+    )
+    e.add_field(name="📦 Données", value="\n".join(f"`{k}` : {v}" for k, v in m["rows"].items()), inline=True)
+    e.add_field(
+        name="💡 Propositions d'amélioration",
+        value=("\n".join(advice) or "✅ Rien à signaler, tout est fluide 🖤")[:1024],
+        inline=False,
+    )
+    return e
+
+
+class OptimView(_OwnerView):
+    def __init__(self, invoker_id: int, metrics: dict, advice: list[str]):
+        super().__init__(invoker_id)
+        self.metrics, self.advice, self.ai_done = metrics, advice, False
+
+    @discord.ui.button(label="Optimiser la base", emoji="🧹", style=discord.ButtonStyle.primary)
+    async def b_db(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        before, now = db_size_mb(), int(time.time())
+        removed = 0
+        for sql, params in (
+            ("DELETE FROM polls WHERE closed=1 AND ends_at>0 AND ends_at<?", (now - 30 * 86400,)),
+            ("DELETE FROM poll_votes WHERE poll_id NOT IN (SELECT id FROM polls)", ()),
+            ("DELETE FROM tickets WHERE status='closed' AND closed_at>0 AND closed_at<?", (now - 90 * 86400,)),
+            ("DELETE FROM automod_strikes WHERE last_at<?", (now - 30 * 86400,)),
+        ):
+            cur = await bot.db.execute(sql, params)
+            removed += max(cur.rowcount, 0)
+        await bot.db.commit()
+        await bot.db.execute("VACUUM")  # hors transaction : on vient de commit
+        await bot.db.execute("PRAGMA optimize")
+        pruned = prune_caches()
+        await interaction.followup.send(
+            f"🧹 **Base optimisée** : {before:.2f} → {db_size_mb():.2f} Mo • {removed} ligne(s) obsolète(s) supprimée(s) "
+            f"• {pruned} entrée(s) de cache purgée(s).", ephemeral=True,
+        )
+
+    @discord.ui.button(label="Conseils de l'IA", emoji="🤖", style=discord.ButtonStyle.secondary)
+    async def b_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ai_done:
+            return await interaction.response.send_message("Les conseils sont déjà au-dessus 😏", ephemeral=True)
+        self.ai_done = True
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        m = self.metrics
+        snapshot = (
+            f"Latence WS {m['ws_ms']:.0f} ms, base {m['db_mb']:.1f} Mo ({m['db_ms']:.1f} ms/requête), "
+            f"RAM {m['mem_mb'] or 'inconnue'} Mo, uptime {fmt_uptime(m['uptime'])}, {m['guilds']} serveurs, "
+            f"{m['members']} membres, {m['cache']} entrées de cache, lignes : {m['rows']}. "
+            f"Constats : {' | '.join(self.advice) or 'aucun'}."
+        )
+        try:
+            text = await ask_ai(
+                [{"role": "user", "content": snapshot}],
+                system=(
+                    "Tu es un ingénieur fiabilité qui audite un bot Discord Python (discord.py, SQLite, API IA). "
+                    "À partir des mesures, donne 4 à 6 améliorations concrètes et priorisées (hébergement, base, "
+                    "caches, quota IA, config Discord). Français, une puce par ligne, 1 phrase chacune, sans intro."
+                ),
+                max_tokens=900, temperature=0.4,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.ai_done = False
+            return await interaction.followup.send(fail_msg(e), ephemeral=True)
+        await interaction.followup.send(embed=emb("🤖 Conseils d'optimisation", text[:3900], COLOR_PINK), ephemeral=True)
+
+
+@bot.tree.command(name="optimiser", description="(admin) Analyse mes performances et propose des améliorations ⚡")
+@app_commands.describe(test_ia="Mesurer aussi la vitesse de l'IA (consomme 1 requête)")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@admin_only
+@app_commands.checks.cooldown(1, 15.0, key=lambda i: i.guild_id)
+async def optimiser(interaction: discord.Interaction, test_ia: bool = False):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    m = await perf_metrics(test_ia)
+    advice = perf_advice(m) + await server_advice(interaction.guild)
+    await interaction.followup.send(
+        embed=perf_embed(m, advice), view=OptimView(interaction.user.id, m, advice), ephemeral=True
+    )
+
+
+# =====================================================================
+# 💻 /dev projet | question : assistance pour créer sites web et applications
+# =====================================================================
+DEV_SYSTEM = (
+    "Tu es un développeur senior full-stack qui aide des gens à créer des sites web et des applications. "
+    "Tu écris du code propre, moderne, commenté juste ce qu'il faut, et qui FONCTIONNE sans modification. "
+    "Tu réponds en français (le code et les noms de fichiers restent en anglais). "
+    "Tu refuses de produire du code malveillant (malware, vol de données, outils d'attaque)."
+)
+DEV_PROJECT_FORMAT = (
+    "\n\nFORMAT DE RÉPONSE OBLIGATOIRE pour un projet :\n"
+    "1) Un court résumé en français (2 à 4 lignes) : ce que tu as construit et comment le lancer.\n"
+    "2) Puis CHAQUE fichier, complet, sous la forme :\n"
+    "=== FILE: chemin/relatif/du/fichier.ext ===\n"
+    "<contenu brut du fichier, SANS bloc markdown ```>\n"
+    "3) Termine par la ligne : === END ===\n"
+    "Règles : 15 fichiers maximum, chemins relatifs simples (pas de ..), inclus un README.md avec les étapes "
+    "d'installation et de lancement. Privilégie la simplicité : pour un site, HTML/CSS/JS sans build si possible."
+)
+DEV_FILE_RE = re.compile(r"^=== FILE: (.+?) ===[ \t]*$", re.M)
+DEV_PATH_RE = re.compile(r"^[\w.\- ]+(?:/[\w.\- ]+)*$")
+DEV_MAX_FILES = 15
+DEV_MAX_BYTES = 600_000
+DEV_MAX_TOKENS = int(os.getenv("DEV_MAX_TOKENS", "8000"))  # baisse-le si ton modèle limite la sortie
+dev_sem = asyncio.Semaphore(2)  # au plus 2 générations lourdes en même temps (protège le quota et la RAM)
+
+
+def safe_rel_path(raw: str) -> Optional[str]:
+    """Chemin relatif sûr (pas de .., pas de chemin absolu) ou None."""
+    p = posixpath.normpath(raw.strip().strip("`'\"").replace("\\", "/"))
+    segments = p.split("/")
+    if len(p) > 100 or len(segments) > 5 or any(s in ("", ".", "..") for s in segments):
+        return None
+    return p if DEV_PATH_RE.match(p) else None
+
+
+def strip_fences(text: str) -> str:
+    t = text.strip("\n")
+    m = re.match(r"^```[\w+-]*\n(.*?)\n```\s*$", t, re.S)
+    return m.group(1) if m else t
+
+
+def parse_dev_files(raw: str) -> tuple[str, dict[str, str]]:
+    """Découpe la réponse de l'IA en (résumé, {chemin: contenu})."""
+    parts = DEV_FILE_RE.split(raw)
+    summary = parts[0].strip()
+    files: dict[str, str] = {}
+    total = 0
+    for i in range(1, len(parts) - 1, 2):
+        name = safe_rel_path(parts[i])
+        body = re.sub(r"^=== END ===[ \t]*$", "", parts[i + 1], flags=re.M)
+        body = strip_fences(body).strip("\n")
+        if not name or not body.strip() or name in files:
+            continue
+        if len(files) >= DEV_MAX_FILES or total + len(body) > DEV_MAX_BYTES:
+            break
+        files[name] = body + "\n"
+        total += len(body)
+    return summary, files
+
+
+def build_zip(files: dict[str, str], root: str) -> io.BytesIO:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, content in files.items():
+            z.writestr(f"{root}/{name}", content)
+    buf.seek(0)
+    return buf
+
+
+def slugify(text: str, default: str = "projet") -> str:
+    return "-".join(plain(text).split()[:4])[:30] or default
+
+
+async def dev_complete(system: str, prompt: str, *, max_tokens: int, effort: str = "low") -> tuple[str, str]:
+    """Appel IA « long » (timeout élargi) pour le code. Renvoie (texte, finish_reason)."""
+    kwargs = {}
+    if "gpt-oss" in AI_MODEL:
+        kwargs["extra_body"] = {"reasoning_effort": effort}
+    async with dev_sem:
+        resp = await ai.with_options(timeout=150, max_retries=1).chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            temperature=0.4, max_tokens=max_tokens, **kwargs,
+        )
+    choice = resp.choices[0]
+    return (choice.message.content or "").strip(), choice.finish_reason or ""
+
+
+dev_group = app_commands.Group(name="dev", description="Assistance dev : sites web, applications, code 💻")
+DEV_KINDS = [
+    app_commands.Choice(name="🌐 Site web", value="site web (HTML/CSS/JS)"),
+    app_commands.Choice(name="🧩 Application web", value="application web"),
+    app_commands.Choice(name="📱 Application mobile", value="application mobile"),
+    app_commands.Choice(name="🤖 Bot Discord", value="bot Discord"),
+    app_commands.Choice(name="⚙️ API / backend", value="API / backend"),
+    app_commands.Choice(name="🛠️ Script / outil", value="script / outil en ligne de commande"),
+]
+
+
+@dev_group.command(name="projet", description="L'IA génère les fichiers d'un site ou d'une application (zip) 🏗️")
+@app_commands.describe(
+    description="Ce que tu veux créer (sois précis : pages, fonctions, style, public…)",
+    kind="Type de projet", stack="Langage / framework voulu (sinon je choisis le plus simple)",
+)
+@app_commands.rename(kind="type")
+@app_commands.choices(kind=DEV_KINDS)
+@app_commands.checks.cooldown(1, 60.0, key=lambda i: i.user.id)
+async def dev_projet(
+    interaction: discord.Interaction,
+    description: app_commands.Range[str, 10, 1500],
+    kind: Optional[app_commands.Choice[str]] = None,
+    stack: Optional[app_commands.Range[str, 2, 80]] = None,
+):
+    await interaction.response.defer(thinking=True)
+    prompt = (
+        f"Crée ce projet : {description}\n"
+        f"Type : {kind.value if kind else 'au choix selon la demande'}\n"
+        f"Stack : {stack or 'au choix, la plus simple et adaptée'}"
+    )
+    try:
+        raw, finish = await dev_complete(DEV_SYSTEM + DEV_PROJECT_FORMAT, prompt, max_tokens=DEV_MAX_TOKENS, effort="medium")
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e))
+    summary, files = parse_dev_files(raw)
+    if not files:
+        if not raw:
+            return await interaction.followup.send("😅 L'IA n'a rien renvoyé, réessaie avec une description plus claire.")
+        return await interaction.followup.send(
+            "😅 Je n'ai pas réussi à découper les fichiers, voici la réponse brute :",
+            file=discord.File(io.BytesIO(raw.encode("utf-8")), filename="reponse.md"),
+        )
+    root = slugify(description)
+    listing = "\n".join(f"📄 `{n}` ({len(c) / 1024:.1f} Ko)" for n, c in files.items())
+    e = emb("🏗️ Projet prêt !", (summary or "Voilà ton projet.")[:1500], COLOR_PINK)
+    e.add_field(name=f"📁 {len(files)} fichier(s)", value=listing[:1000], inline=False)
+    if finish == "length":
+        e.add_field(
+            name="⚠️ Réponse tronquée",
+            value="L'IA a atteint sa limite : le dernier fichier peut être incomplet. Relance avec une demande plus ciblée.",
+            inline=False,
+        )
+    if len(files) == 1:
+        name, content = next(iter(files.items()))
+        attach = discord.File(io.BytesIO(content.encode("utf-8")), filename=posixpath.basename(name))
+    else:
+        attach = discord.File(build_zip(files, root), filename=f"{root}.zip")
+    await interaction.followup.send(embed=e, file=attach)
+
+
+@dev_group.command(name="question", description="Pose une question de dev : code, bug, architecture 🧑‍💻")
+@app_commands.describe(question="Ta question", code="Du code à analyser ou corriger (optionnel)")
+@ai_cd()
+async def dev_question(
+    interaction: discord.Interaction,
+    question: app_commands.Range[str, 5, 1500],
+    code: Optional[app_commands.Range[str, 1, 3000]] = None,
+):
+    await interaction.response.defer(thinking=True)
+    prompt = question + (f"\n\nCode :\n```\n{code}\n```" if code else "")
+    try:
+        text, _ = await dev_complete(
+            DEV_SYSTEM + "\n\nRéponds directement et clairement ; mets le code dans des blocs markdown avec leur langage.",
+            prompt, max_tokens=3000,
+        )
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e))
+    for chunk in split_text(text or "😅 Pas de réponse, reformule ta question."):
+        await interaction.followup.send(chunk, allowed_mentions=NO_PINGS)
+
+
+bot.tree.add_command(dev_group)
+
+
+# =====================================================================
+# 👋 /bienvenue config | generer | tester : messages de bienvenue personnalisés
+#   Mode « texte » : modèle avec {user} {nom} {serveur} {membres}.
+#   Mode « ia »   : un message unique écrit par l'IA pour chaque nouvel arrivant.
+# =====================================================================
+DEFAULT_WELCOME = "Bienvenue {user} sur **{serveur}** ! Tu es notre {membres}ᵉ membre 🖤 Fais comme chez toi."
+WELCOME_VARS = "{user} {nom} {serveur} {membres}"
+_join_times: dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
+
+
+def welcome_render(tpl: str, member: discord.Member) -> str:
+    g = member.guild
+    return (
+        tpl.replace("{user}", member.mention).replace("{nom}", member.display_name)
+        .replace("{serveur}", g.name).replace("{membres}", str(g.member_count or len(g.members)))
+    )[:1900]
+
+
+async def welcome_ai_template(guild: discord.Guild, member_name: str, count: int, theme: str, style: str) -> str:
+    system = (
+        persona(False, style)
+        + "\n\nTu écris un message d'ACCUEIL pour un nouveau membre du serveur : 1 à 3 phrases, avec ton caractère. "
+        "Écris exactement {user} à l'endroit où mentionner le membre (une seule fois). "
+        "Aucun @everyone/@here, aucun lien."
+    )
+    prompt = (
+        f"Serveur : {guild.name}. Pseudo du nouveau : {member_name}. Il y a maintenant {count} membres. "
+        f"Consignes du staff : {theme or 'aucune'}."
+    )
+    out = (await ask_ai([{"role": "user", "content": prompt}], system=system, max_tokens=400)).strip()
+    out = out.replace("@everyone", "everyone").replace("@here", "here")
+    if not out:
+        raise ValueError("message vide")
+    return out if "{user}" in out else "{user} " + out
+
+
+async def build_welcome(member: discord.Member, *, allow_ai: bool = True) -> str:
+    gid = member.guild.id
+    tpl = await get_setting(gid, "welcome_text", "") or DEFAULT_WELCOME
+    if allow_ai and await get_setting(gid, "welcome_mode", "texte") == "ia":
+        now = time.time()
+        recent = [t for t in _join_times[gid] if now - t < 60]
+        if len(recent) < 5:  # anti-raid : pas d'appel IA quand 5+ personnes arrivent en une minute
+            try:
+                tpl = await welcome_ai_template(
+                    member.guild, member.display_name, member.guild.member_count or 0,
+                    await get_setting(gid, "welcome_theme", ""), await get_style(gid),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Bienvenue IA : %r", e)
+    return welcome_render(tpl, member)
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.bot:
+        return
+    gid = member.guild.id
+    _join_times[gid].append(time.time())
+    spawn(join_log(member))
+    if not await get_flag(gid, "welcome_on", False):
+        return
+    ch = member.guild.get_channel(await get_int(gid, "welcome_channel"))
+    if ch is None or not ch.permissions_for(member.guild.me).send_messages:
+        return
+    text = await build_welcome(member)
+    try:
+        await ch.send(text, allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False))
+    except discord.HTTPException:
+        log.warning("Bienvenue : envoi impossible dans %s", ch.id)
+    if await get_flag(gid, "welcome_dm", False):
+        try:
+            await member.send(text)
+        except discord.HTTPException:
+            pass  # MP fermés
+
+
+bienvenue_group = app_commands.Group(
+    name="bienvenue", description="(staff) Messages de bienvenue personnalisés 👋",
+    guild_only=True, default_permissions=discord.Permissions(manage_guild=True),
+)
+staff_only = app_commands.checks.has_permissions(manage_guild=True)
+
+
+async def welcome_state_embed(guild: discord.Guild) -> discord.Embed:
+    gid = guild.id
+    on = await get_flag(gid, "welcome_on", False)
+    cid = await get_int(gid, "welcome_channel")
+    mode = await get_setting(gid, "welcome_mode", "texte")
+    e = emb("👋 Messages de bienvenue", None, COLOR_PINK)
+    e.add_field(name="État", value="✅ Activé" if on else "⛔ Désactivé", inline=True)
+    e.add_field(name="Salon", value=f"<#{cid}>" if cid else "— (à définir)", inline=True)
+    e.add_field(name="Mode", value="🤖 IA (un message unique par membre)" if mode == "ia" else "📝 Texte (modèle fixe)", inline=True)
+    e.add_field(name="MP au nouveau", value="oui" if await get_flag(gid, "welcome_dm", False) else "non", inline=True)
+    theme = await get_setting(gid, "welcome_theme", "")
+    if theme:
+        e.add_field(name="Consignes pour l'IA", value=theme[:300], inline=False)
+    e.add_field(name="Modèle", value=(await get_setting(gid, "welcome_text", "") or DEFAULT_WELCOME)[:600], inline=False)
+    e.add_field(name="Variables", value=f"`{WELCOME_VARS}`", inline=False)
+    return e
+
+
+@bienvenue_group.command(name="config", description="Règle les messages de bienvenue")
+@app_commands.describe(
+    salon="Salon où accueillir les nouveaux", actif="Activer / désactiver l'accueil",
+    mode="texte = modèle fixe • ia = message unique écrit par l'IA",
+    message="Modèle de message (variables : {user} {nom} {serveur} {membres})",
+    theme="Consignes pour l'IA (ton, ambiance, infos à rappeler…)", mp="Envoyer aussi le message en MP",
+)
+@app_commands.choices(mode=[
+    app_commands.Choice(name="📝 Texte (modèle fixe)", value="texte"),
+    app_commands.Choice(name="🤖 IA (message unique par membre)", value="ia"),
+])
+@staff_only
+async def bienvenue_config(
+    interaction: discord.Interaction, salon: Optional[discord.TextChannel] = None, actif: Optional[bool] = None,
+    mode: Optional[app_commands.Choice[str]] = None, message: Optional[app_commands.Range[str, 1, 1000]] = None,
+    theme: Optional[app_commands.Range[str, 1, 300]] = None, mp: Optional[bool] = None,
+):
+    gid = interaction.guild_id
+    if salon is not None:
+        p = salon.permissions_for(interaction.guild.me)
+        if not p.send_messages:
+            return await interaction.response.send_message(f"🚫 Je ne peux pas écrire dans {salon.mention}.", ephemeral=True)
+        await set_setting(gid, "welcome_channel", str(salon.id))
+    if mode is not None:
+        await set_setting(gid, "welcome_mode", mode.value)
+    if message is not None:
+        await set_setting(gid, "welcome_text", message.replace("\\n", "\n"))
+    if theme is not None:
+        await set_setting(gid, "welcome_theme", theme)
+    if mp is not None:
+        await set_flag(gid, "welcome_dm", mp)
+    if actif is not None:
+        if actif and not await get_int(gid, "welcome_channel"):
+            return await interaction.response.send_message("Définis d'abord un `salon` pour l'accueil 😏", ephemeral=True)
+        await set_flag(gid, "welcome_on", actif)
+    await interaction.response.send_message(embed=await welcome_state_embed(interaction.guild), ephemeral=True)
+
+
+class WelcomePreview(_OwnerView):
+    def __init__(self, invoker_id: int, template: str):
+        super().__init__(invoker_id)
+        self.template = template
+
+    @discord.ui.button(label="Utiliser ce message", emoji="✅", style=discord.ButtonStyle.success)
+    async def b_use(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await set_setting(interaction.guild_id, "welcome_text", self.template)
+        await set_setting(interaction.guild_id, "welcome_mode", "texte")
+        await interaction.response.edit_message(
+            content="✅ Modèle enregistré (mode texte). Active l'accueil avec `/bienvenue config actif:True salon:#…`.",
+            embed=None, view=None,
+        )
+
+    @discord.ui.button(label="Annuler", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Annulé 😏", embed=None, view=None)
+
+
+@bienvenue_group.command(name="generer", description="L'IA écrit un modèle de bienvenue à ton goût ✨")
+@app_commands.describe(ton="Ambiance voulue : chaleureux, gaming, drôle, sobre, e-girl…")
+@staff_only
+@ai_cd()
+async def bienvenue_generer(interaction: discord.Interaction, ton: app_commands.Range[str, 3, 200]):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    system = (
+        persona(False, await get_style(interaction.guild_id))
+        + f"\n\nTu écris un MODÈLE réutilisable de message de bienvenue (2 à 4 phrases). Utilise ces variables telles quelles : "
+        f"{WELCOME_VARS}. Pas de @everyone/@here, pas de lien. Réponds avec le message seul."
+    )
+    try:
+        tpl = await ask_ai([{"role": "user", "content": f"Ambiance voulue : {ton}"}], system=system, max_tokens=500)
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e), ephemeral=True)
+    tpl = tpl.strip().replace("@everyone", "everyone").replace("@here", "here")[:1000]
+    if not tpl:
+        return await interaction.followup.send("😅 Rien de généré, réessaie.", ephemeral=True)
+    preview = welcome_render(tpl, interaction.user)
+    e = emb("✨ Aperçu du message de bienvenue", preview, COLOR_PINK)
+    e.add_field(name="Modèle enregistrable", value=f"```{tpl[:900]}```", inline=False)
+    await interaction.followup.send(embed=e, view=WelcomePreview(interaction.user.id, tpl), ephemeral=True)
+
+
+@bienvenue_group.command(name="tester", description="Voir à quoi ressemblera l'accueil (aperçu privé)")
+@staff_only
+@ai_cd()
+async def bienvenue_tester(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    text = await build_welcome(interaction.user)
+    await interaction.followup.send(embed=emb("👋 Aperçu de l'accueil", text, COLOR_PINK), ephemeral=True)
+
+
+bot.tree.add_command(bienvenue_group)
+
+
+# =====================================================================
+# 📊 /sondage : sondages interactifs à boutons (votes persistants, fin automatique)
+# =====================================================================
+POLL_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+async def poll_get(pid: int) -> Optional[dict]:
+    rows = await db_all(
+        "SELECT id, guild_id, channel_id, message_id, creator_id, question, options, multiple, ends_at, closed "
+        "FROM polls WHERE id=?", (pid,),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r[0], "guild_id": r[1], "channel_id": r[2], "message_id": r[3], "creator_id": r[4],
+        "question": r[5], "options": json.loads(r[6]), "multiple": bool(r[7]), "ends_at": r[8], "closed": bool(r[9]),
+    }
+
+
+async def poll_counts(pid: int, n: int) -> tuple[list[int], int]:
+    counts = [0] * n
+    for opt, c in await db_all("SELECT opt, COUNT(*) FROM poll_votes WHERE poll_id=? GROUP BY opt", (pid,)):
+        if 0 <= opt < n:
+            counts[opt] = c
+    voters = (await db_all("SELECT COUNT(DISTINCT user_id) FROM poll_votes WHERE poll_id=?", (pid,)))[0][0]
+    return counts, voters
+
+
+def poll_embed(poll: dict, counts: list[int], voters: int, closed: bool = False) -> discord.Embed:
+    total, best = sum(counts), max(counts, default=0)
+    lines = []
+    for i, (opt, c) in enumerate(zip(poll["options"], counts)):
+        pct = c / total * 100 if total else 0
+        filled = round(pct / 100 * 12)
+        crown = " 👑" if closed and best > 0 and c == best else ""
+        lines.append(f"{POLL_EMOJI[i]} **{opt}**{crown}\n`{'▰' * filled}{'▱' * (12 - filled)}` {pct:.0f}% · {c} vote{'s' if c > 1 else ''}")
+    if closed:
+        head = "🔒 **Sondage terminé**"
+    elif poll["ends_at"]:
+        head = f"⏳ Fin <t:{poll['ends_at']}:R>"
+    else:
+        head = "♾️ Sans limite de temps"
+    e = discord.Embed(
+        title=f"📊 {poll['question']}"[:250], description=head + "\n\n" + "\n\n".join(lines),
+        color=COLOR_DARK if closed else COLOR_PURPLE,
+    )
+    e.set_footer(text=f"Sondage #{poll['id']} • {'plusieurs choix' if poll['multiple'] else 'un seul choix'} • {voters} votant{'s' if voters > 1 else ''}")
+    return e
+
+
+class PollVote(discord.ui.DynamicItem[discord.ui.Button], template=r"poll:(?P<pid>[0-9]+):(?P<idx>[0-9]+)"):
+    def __init__(self, pid: int, idx: int, label: str = "Option"):
+        super().__init__(discord.ui.Button(
+            label=f"{idx + 1}. {label}"[:80], style=discord.ButtonStyle.secondary, custom_id=f"poll:{pid}:{idx}",
+        ))
+        self.pid, self.idx = pid, idx
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls(int(match["pid"]), int(match["idx"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        poll = await poll_get(self.pid)
+        if poll is None or poll["closed"] or (poll["ends_at"] and poll["ends_at"] <= time.time()):
+            return await interaction.response.send_message("🔒 Ce sondage est terminé.", ephemeral=True)
+        if self.idx >= len(poll["options"]):
+            return await interaction.response.send_message("Cette option n'existe plus 😅", ephemeral=True)
+        uid = interaction.user.id
+        have = {r[0] for r in await db_all("SELECT opt FROM poll_votes WHERE poll_id=? AND user_id=?", (self.pid, uid))}
+        if self.idx in have:  # re-cliquer retire son vote
+            await bot.db.execute("DELETE FROM poll_votes WHERE poll_id=? AND user_id=? AND opt=?", (self.pid, uid, self.idx))
+        else:
+            if not poll["multiple"]:
+                await bot.db.execute("DELETE FROM poll_votes WHERE poll_id=? AND user_id=?", (self.pid, uid))
+            await bot.db.execute("INSERT OR IGNORE INTO poll_votes(poll_id, user_id, opt) VALUES (?,?,?)", (self.pid, uid, self.idx))
+        await bot.db.commit()
+        counts, voters = await poll_counts(self.pid, len(poll["options"]))
+        await interaction.response.edit_message(embed=poll_embed(poll, counts, voters))
+
+
+class PollEnd(discord.ui.DynamicItem[discord.ui.Button], template=r"poll_end:(?P<pid>[0-9]+)"):
+    def __init__(self, pid: int):
+        super().__init__(discord.ui.Button(
+            label="Terminer", emoji="🔒", style=discord.ButtonStyle.danger, custom_id=f"poll_end:{pid}",
+        ))
+        self.pid = pid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls(int(match["pid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        poll = await poll_get(self.pid)
+        if poll is None or poll["closed"]:
+            return await interaction.response.send_message("🔒 Ce sondage est déjà terminé.", ephemeral=True)
+        if interaction.user.id != poll["creator_id"] and not interaction.permissions.manage_messages:
+            return await interaction.response.send_message("Seul l'auteur ou le staff peut terminer ce sondage 😏", ephemeral=True)
+        await poll_close(self.pid)
+        await interaction.response.send_message("🔒 Sondage terminé.", ephemeral=True)
+
+
+def poll_view(pid: int, options: list[str]) -> discord.ui.View:
+    v = discord.ui.View(timeout=None)
+    for i, opt in enumerate(options):
+        v.add_item(PollVote(pid, i, opt))
+    v.add_item(PollEnd(pid))
+    return v
+
+
+async def poll_close(pid: int) -> bool:
+    """Termine un sondage : verrouille les votes, fige l'embed, annonce le résultat."""
+    poll = await poll_get(pid)
+    if poll is None or poll["closed"]:
+        return False
+    await db_run("UPDATE polls SET closed=1 WHERE id=?", (pid,))
+    counts, voters = await poll_counts(pid, len(poll["options"]))
+    ch = bot.get_channel(poll["channel_id"])
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(poll["channel_id"])
+        except discord.HTTPException:
+            return True
+    try:
+        await ch.get_partial_message(poll["message_id"]).edit(embed=poll_embed(poll, counts, voters, closed=True), view=None)
+    except discord.HTTPException:
+        pass
+    total, best = sum(counts), max(counts, default=0)
+    if total == 0:
+        verdict = "Personne n'a voté 😅"
+    else:
+        winners = [o for o, c in zip(poll["options"], counts) if c == best]
+        verdict = ("Égalité : " if len(winners) > 1 else "Gagnant : ") + " / ".join(f"**{w}**" for w in winners) + f" ({best} vote{'s' if best > 1 else ''})"
+    try:
+        await ch.send(f"📊 Sondage terminé : **{poll['question']}**\n{verdict}", allowed_mentions=NO_PINGS)
+    except discord.HTTPException:
+        pass
+    return True
+
+
+@tasks.loop(seconds=30)
+async def poll_loop():
+    try:
+        rows = await db_all("SELECT id FROM polls WHERE closed=0 AND ends_at>0 AND ends_at<=?", (int(time.time()),))
+    except Exception:  # noqa: BLE001
+        log.exception("poll_loop : lecture impossible")
+        return
+    for (pid,) in rows:
+        try:
+            await poll_close(pid)
+        except Exception:  # noqa: BLE001
+            log.exception("poll_loop : fermeture du sondage %s impossible", pid)
+
+
+@poll_loop.before_loop
+async def _before_poll_loop():
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(name="sondage", description="Crée un sondage interactif à boutons 📊")
+@app_commands.describe(
+    question="La question posée",
+    options="2 à 10 choix séparés par | (sinon : Oui | Non)",
+    duree="Durée : 30m, 2h, 1j… (défaut : 1j) — « off » = sans limite",
+    multiple="Autoriser plusieurs choix par personne",
+)
+@app_commands.guild_only()
+@app_commands.checks.cooldown(1, 20.0, key=lambda i: i.user.id)
+async def sondage(
+    interaction: discord.Interaction, question: app_commands.Range[str, 3, 200],
+    options: Optional[str] = None, duree: str = "1j", multiple: bool = False,
+):
+    opts = list(dict.fromkeys(o.strip() for o in re.split(r"[|;\n]", options or "👍 Oui | 👎 Non") if o.strip()))
+    if not 2 <= len(opts) <= 10 or any(len(o) > 70 for o in opts):
+        return await interaction.response.send_message(
+            "📊 Il faut **2 à 10** choix différents (70 caractères max chacun), séparés par `|`.", ephemeral=True
+        )
+    if duree.strip().lower() in ("off", "non", "0", "aucune", "illimite", "illimité"):
+        ends_at = 0
+    else:
+        minutes = parse_minutes(duree)
+        if minutes is None:
+            return await interaction.response.send_message("⏱️ Durée invalide : `30m`, `2h`, `1j` (max 28 jours) ou `off`.", ephemeral=True)
+        ends_at = int(time.time()) + minutes * 60
+    cur = await bot.db.execute(
+        "INSERT INTO polls(guild_id, channel_id, creator_id, question, options, multiple, ends_at) VALUES (?,?,?,?,?,?,?)",
+        (interaction.guild_id, interaction.channel_id, interaction.user.id, question, json.dumps(opts, ensure_ascii=False),
+         int(multiple), ends_at),
+    )
+    await bot.db.commit()
+    pid = cur.lastrowid
+    poll = await poll_get(pid)
+    try:
+        await interaction.response.send_message(embed=poll_embed(poll, [0] * len(opts), 0), view=poll_view(pid, opts))
+        msg = await interaction.original_response()
+    except discord.HTTPException:
+        await db_run("DELETE FROM polls WHERE id=?", (pid,))
+        raise
+    await db_run("UPDATE polls SET message_id=? WHERE id=?", (msg.id, pid))
+
+
+# =====================================================================
+# 🎫 /ticket : système de tickets d'assistance (salon privé + transcript)
+#   Staff : /ticket config puis /ticket panel.  Membres : bouton « Ouvrir un ticket ».
+# =====================================================================
+_tk_busy: set[tuple[int, int]] = set()  # (serveur, membre) en cours de création : évite les doublons
+
+
+async def tk_config(gid: int) -> dict:
+    try:
+        limit = max(1, int(await get_setting(gid, "ticket_limit", "1")))
+    except ValueError:
+        limit = 1
+    return {
+        "category": await get_int(gid, "ticket_category"), "staff": await get_int(gid, "ticket_staff"),
+        "log": await get_int(gid, "ticket_log"), "limit": limit,
+    }
+
+
+def is_ticket_staff(member: discord.abc.User, staff_role_id: int) -> bool:
+    if not isinstance(member, discord.Member):
+        return False
+    p = member.guild_permissions
+    return p.administrator or p.manage_channels or (bool(staff_role_id) and any(r.id == staff_role_id for r in member.roles))
+
+
+async def ticket_by_channel(cid: int) -> Optional[dict]:
+    rows = await db_all(
+        "SELECT id, guild_id, user_id, subject, status, claimed_by, created_at FROM tickets WHERE channel_id=?", (cid,)
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {"id": r[0], "guild_id": r[1], "user_id": r[2], "subject": r[3], "status": r[4], "claimed_by": r[5], "created_at": r[6]}
+
+
+async def ticket_log(guild: discord.Guild, embed: discord.Embed, file: Optional[discord.File] = None) -> bool:
+    """Log des tickets : salon dédié (/ticket config) sinon salon de logs général."""
+    if not await log_cat_enabled(guild.id, "tickets"):
+        return False
+    for key in ("ticket_log", "log_channel"):
+        ch = guild.get_channel(await get_int(guild.id, key))
+        if ch is not None:
+            try:
+                await ch.send(embed=embed, file=file, allowed_mentions=NO_PINGS)
+                return True
+            except discord.HTTPException:
+                return False
+    return False
+
+
+async def ticket_transcript(channel: discord.TextChannel, t: dict) -> bytes:
+    lines = [
+        f"Transcript du ticket #{t['id']:04d} — {channel.guild.name}",
+        f"Sujet : {t['subject']}", f"Ouvert par : {t['user_id']}", "-" * 40,
+    ]
+    try:
+        async for m in channel.history(limit=1000, oldest_first=True):
+            body = m.content or ""
+            for e in m.embeds:
+                if e.description:
+                    body += f"\n  [embed] {e.title or ''} {e.description}".rstrip()
+            for a in m.attachments:
+                body += f"\n  [fichier] {a.url}"
+            lines.append(f"[{m.created_at:%Y-%m-%d %H:%M}] {m.author.display_name}: {body}")
+    except discord.HTTPException:
+        lines.append("(historique incomplet : accès refusé)")
+    return "\n".join(lines).encode("utf-8")
+
+
+async def close_ticket(channel: discord.TextChannel, closer: discord.abc.User, reason: Optional[str] = None) -> bool:
+    t = await ticket_by_channel(channel.id)
+    if t is None or t["status"] != "open":
+        return False
+    cur = await bot.db.execute(
+        "UPDATE tickets SET status='closed', closed_at=? WHERE id=? AND status='open'", (int(time.time()), t["id"])
+    )
+    await bot.db.commit()
+    if cur.rowcount == 0:  # une autre fermeture est déjà en cours
+        return False
+    guild = channel.guild
+    desc = f"Fermé par {closer.mention}." + (f"\n**Raison :** {reason}" if reason else "") + "\nCe salon sera supprimé dans quelques secondes."
+    try:
+        await channel.send(embed=emb("🔒 Ticket fermé", desc, COLOR_DARK), allowed_mentions=NO_PINGS)
+    except discord.HTTPException:
+        pass
+    data, fname = await ticket_transcript(channel, t), f"ticket-{t['id']:04d}.txt"
+    le = discord.Embed(title=f"🎫 Ticket #{t['id']:04d} fermé", color=COLOR_DARK)
+    le.add_field(name="Auteur", value=f"<@{t['user_id']}>", inline=True)
+    le.add_field(name="Fermé par", value=closer.mention, inline=True)
+    if t["claimed_by"]:
+        le.add_field(name="Pris en charge par", value=f"<@{t['claimed_by']}>", inline=True)
+    le.add_field(name="Sujet", value=t["subject"][:200], inline=False)
+    if reason:
+        le.add_field(name="Raison", value=reason[:300], inline=False)
+    le.timestamp = discord.utils.utcnow()
+    await ticket_log(guild, le, discord.File(io.BytesIO(data), filename=fname))
+    opener = guild.get_member(t["user_id"])
+    if opener is not None:
+        try:
+            await opener.send(
+                f"🎫 Ton ticket **#{t['id']:04d}** sur **{guild.name}** est fermé. Voici le transcript :",
+                file=discord.File(io.BytesIO(data), filename=fname),
+            )
+        except discord.HTTPException:
+            pass  # MP fermés
+    await asyncio.sleep(8)
+    try:
+        await channel.delete(reason=f"Ticket #{t['id']} fermé par {closer}")
+    except discord.HTTPException:
+        log.warning("Ticket #%s : suppression du salon impossible", t["id"])
+    return True
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    """Salon de ticket supprimé à la main : on libère le membre."""
+    await db_run("UPDATE tickets SET status='closed', closed_at=? WHERE channel_id=? AND status='open'", (int(time.time()), channel.id))
+
+
+class TicketConfirm(_OwnerView):
+    def __init__(self, invoker_id: int, channel: discord.TextChannel):
+        super().__init__(invoker_id)
+        self.channel = channel
+
+    @discord.ui.button(label="Oui, fermer", emoji="🔒", style=discord.ButtonStyle.danger)
+    async def b_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🔒 Fermeture en cours…", view=None)
+        spawn(close_ticket(self.channel, interaction.user))
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Ticket conservé 🖤", view=None)
+
+
+class TicketClose(discord.ui.DynamicItem[discord.ui.Button], template=r"ticket:close"):
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Fermer", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ticket:close"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction):
+        t = await ticket_by_channel(interaction.channel_id)
+        if t is None or t["status"] != "open":
+            return await interaction.response.send_message("Ce ticket est déjà fermé.", ephemeral=True)
+        cfg = await tk_config(interaction.guild_id)
+        if interaction.user.id != t["user_id"] and not is_ticket_staff(interaction.user, cfg["staff"]):
+            return await interaction.response.send_message("Seuls l'auteur et le staff peuvent fermer ce ticket 😏", ephemeral=True)
+        await interaction.response.send_message(
+            "Fermer ce ticket ? Un transcript sera sauvegardé puis le salon sera supprimé.",
+            view=TicketConfirm(interaction.user.id, interaction.channel), ephemeral=True,
+        )
+
+
+class TicketClaim(discord.ui.DynamicItem[discord.ui.Button], template=r"ticket:claim"):
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Prendre en charge", emoji="🙋", style=discord.ButtonStyle.success, custom_id="ticket:claim"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction):
+        t = await ticket_by_channel(interaction.channel_id)
+        if t is None or t["status"] != "open":
+            return await interaction.response.send_message("Ce ticket est fermé.", ephemeral=True)
+        cfg = await tk_config(interaction.guild_id)
+        if not is_ticket_staff(interaction.user, cfg["staff"]):
+            return await interaction.response.send_message("Réservé au staff 😏", ephemeral=True)
+        if t["claimed_by"]:
+            return await interaction.response.send_message(f"Déjà pris en charge par <@{t['claimed_by']}>.", ephemeral=True)
+        await db_run("UPDATE tickets SET claimed_by=? WHERE id=?", (interaction.user.id, t["id"]))
+        await interaction.response.send_message(f"🙋 {interaction.user.mention} prend ce ticket en charge.", allowed_mentions=NO_PINGS)
+
+
+def ticket_controls() -> discord.ui.View:
+    v = discord.ui.View(timeout=None)
+    v.add_item(TicketClaim())
+    v.add_item(TicketClose())
+    return v
+
+
+class TicketModal(SafeModal, title="🎫 Ouvrir un ticket"):
+    sujet = discord.ui.TextInput(label="Sujet", placeholder="En quelques mots…", max_length=80)
+    details = discord.ui.TextInput(
+        label="Détails", style=discord.TextStyle.paragraph, required=False, max_length=800,
+        placeholder="Explique ta demande ou ton problème.",
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild, member = interaction.guild, interaction.user
+        await interaction.response.defer(ephemeral=True)
+        key = (guild.id, member.id)
+        if key in _tk_busy:
+            return await interaction.followup.send("⏳ Ton ticket est en cours de création…", ephemeral=True)
+        _tk_busy.add(key)
+        try:
+            await self._create(interaction, guild, member)
+        finally:
+            _tk_busy.discard(key)
+
+    async def _create(self, interaction: discord.Interaction, guild: discord.Guild, member: discord.Member):
+        cfg = await tk_config(guild.id)
+        if not guild.me.guild_permissions.manage_channels:
+            return await interaction.followup.send("🚫 Il me manque la permission « Gérer les salons ».", ephemeral=True)
+        alive = []
+        for tid, cid in await db_all("SELECT id, channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'", (guild.id, member.id)):
+            if guild.get_channel(cid) is None:
+                await db_run("UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(time.time()), tid))
+            else:
+                alive.append(cid)
+        if len(alive) >= cfg["limit"]:
+            return await interaction.followup.send(f"🎫 Tu as déjà un ticket ouvert : <#{alive[0]}>", ephemeral=True)
+        staff_role = guild.get_role(cfg["staff"]) if cfg["staff"] else None
+        user_perm = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, attach_files=True, embed_links=True, read_message_history=True
+        )
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: user_perm,
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_channels=True, manage_messages=True,
+                embed_links=True, attach_files=True, read_message_history=True,
+            ),
+        }
+        if staff_role is not None:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_messages=True, attach_files=True, read_message_history=True
+            )
+        cur = await bot.db.execute(
+            "INSERT INTO tickets(guild_id, channel_id, user_id, subject, created_at) VALUES (?,?,?,?,?)",
+            (guild.id, 0, member.id, str(self.sujet)[:80], int(time.time())),
+        )
+        await bot.db.commit()
+        tid = cur.lastrowid
+        slug = "-".join(plain(member.display_name).split())[:20]
+        category = guild.get_channel(cfg["category"]) if cfg["category"] else None
+        try:
+            channel = await guild.create_text_channel(
+                f"ticket-{tid:04d}" + (f"-{slug}" if slug else ""),
+                category=category if isinstance(category, discord.CategoryChannel) else None,
+                overwrites=overwrites, topic=f"Ticket de {member} • {str(self.sujet)[:80]}",
+                reason=f"Ticket #{tid} ouvert par {member}",
+            )
+        except discord.HTTPException as e:
+            await db_run("DELETE FROM tickets WHERE id=?", (tid,))
+            return await interaction.followup.send(f"🚫 Impossible de créer le salon ({e.text or 'erreur Discord'}).", ephemeral=True)
+        await db_run("UPDATE tickets SET channel_id=? WHERE id=?", (channel.id, tid))
+        e = emb(f"🎫 Ticket #{tid:04d} — {str(self.sujet)[:200]}", str(self.details) or "*Pas de détails fournis.*", COLOR_PINK)
+        e.add_field(name="Auteur", value=member.mention, inline=True)
+        e.set_footer(text="Un membre du staff va te répondre • bouton « Fermer » quand c'est réglé")
+        ping = (staff_role.mention + " " if staff_role else "") + member.mention
+        await channel.send(
+            ping, embed=e, view=ticket_controls(),
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=[staff_role] if staff_role else False, everyone=False),
+        )
+        le = discord.Embed(title=f"🎫 Ticket #{tid:04d} ouvert", color=COLOR_PURPLE)
+        le.add_field(name="Auteur", value=f"{member.mention} (`{member.id}`)", inline=True)
+        le.add_field(name="Salon", value=channel.mention, inline=True)
+        le.add_field(name="Sujet", value=str(self.sujet)[:200], inline=False)
+        le.timestamp = discord.utils.utcnow()
+        spawn(ticket_log(guild, le))
+        await interaction.followup.send(f"🎫 Ticket créé : {channel.mention}", ephemeral=True)
+
+
+class TicketOpen(discord.ui.DynamicItem[discord.ui.Button], template=r"ticket:open"):
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Ouvrir un ticket", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="ticket:open"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TicketModal())
+
+
+ticket_group = app_commands.Group(name="ticket", description="Système de tickets d'assistance 🎫", guild_only=True)
+
+
+@ticket_group.command(name="config", description="(staff) Règle le système de tickets")
+@app_commands.describe(
+    categorie="Catégorie où créer les tickets", role_staff="Rôle qui gère les tickets",
+    salon_logs="Salon des transcripts (sinon le salon de /logs)", limite="Tickets ouverts max par membre (1 par défaut)",
+)
+@staff_only
+async def ticket_config(
+    interaction: discord.Interaction, categorie: Optional[discord.CategoryChannel] = None,
+    role_staff: Optional[discord.Role] = None, salon_logs: Optional[discord.TextChannel] = None,
+    limite: Optional[app_commands.Range[int, 1, 5]] = None,
+):
+    gid = interaction.guild_id
+    if categorie is not None:
+        await set_setting(gid, "ticket_category", str(categorie.id))
+    if role_staff is not None:
+        await set_setting(gid, "ticket_staff", str(role_staff.id))
+    if salon_logs is not None:
+        await set_setting(gid, "ticket_log", str(salon_logs.id))
+    if limite is not None:
+        await set_setting(gid, "ticket_limit", str(limite))
+    cfg = await tk_config(gid)
+    e = emb("🎫 Réglages des tickets", None, COLOR_PINK)
+    e.add_field(name="Catégorie", value=f"<#{cfg['category']}>" if cfg["category"] else "— (salons à la racine)", inline=True)
+    e.add_field(name="Rôle staff", value=f"<@&{cfg['staff']}>" if cfg["staff"] else "— (admins / gestion des salons)", inline=True)
+    e.add_field(name="Transcripts", value=f"<#{cfg['log']}>" if cfg["log"] else "salon de `/logs`", inline=True)
+    e.add_field(name="Limite par membre", value=str(cfg["limit"]), inline=True)
+    e.add_field(name="Étape suivante", value="`/ticket panel` poste le bouton « Ouvrir un ticket ». Le transcript est envoyé au staff et en MP à l'auteur à la fermeture.", inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@ticket_group.command(name="panel", description="(staff) Poste le panneau avec le bouton « Ouvrir un ticket »")
+@app_commands.describe(salon="Salon où poster (ici par défaut)", titre="Titre du panneau", description="Texte d'explication")
+@staff_only
+async def ticket_panel(
+    interaction: discord.Interaction, salon: Optional[discord.TextChannel] = None,
+    titre: str = "🎫 Besoin d'aide ?", description: Optional[str] = None,
+):
+    channel = salon or interaction.channel
+    if not interaction.guild.me.guild_permissions.manage_channels:
+        return await interaction.response.send_message("🚫 Il me manque la permission « Gérer les salons ».", ephemeral=True)
+    body = (description or "Clique sur le bouton pour ouvrir un ticket privé : le staff te répondra dès que possible.").replace("\\n", "\n")
+    view = discord.ui.View(timeout=None)
+    view.add_item(TicketOpen())
+    try:
+        await channel.send(embed=emb(titre[:250], body[:3000], COLOR_PINK), view=view)
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        return await interaction.response.send_message(f"🚫 Je ne peux pas écrire dans {channel.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Panneau posté dans {channel.mention}.", ephemeral=True)
+
+
+@ticket_group.command(name="fermer", description="Ferme le ticket actuel (transcript sauvegardé)")
+@app_commands.describe(raison="Raison de la fermeture (optionnel)")
+async def ticket_fermer(interaction: discord.Interaction, raison: Optional[app_commands.Range[str, 1, 200]] = None):
+    t = await ticket_by_channel(interaction.channel_id)
+    if t is None or t["status"] != "open":
+        return await interaction.response.send_message("Ce salon n'est pas un ticket ouvert 😏", ephemeral=True)
+    cfg = await tk_config(interaction.guild_id)
+    if interaction.user.id != t["user_id"] and not is_ticket_staff(interaction.user, cfg["staff"]):
+        return await interaction.response.send_message("Seuls l'auteur et le staff peuvent fermer ce ticket 😏", ephemeral=True)
+    await interaction.response.send_message("🔒 Fermeture du ticket…", ephemeral=True)
+    spawn(close_ticket(interaction.channel, interaction.user, raison))
+
+
+async def _ticket_member_edit(interaction: discord.Interaction, membre: discord.Member, add: bool):
+    t = await ticket_by_channel(interaction.channel_id)
+    if t is None or t["status"] != "open":
+        return await interaction.response.send_message("Ce salon n'est pas un ticket ouvert 😏", ephemeral=True)
+    cfg = await tk_config(interaction.guild_id)
+    if not is_ticket_staff(interaction.user, cfg["staff"]):
+        return await interaction.response.send_message("Réservé au staff 😏", ephemeral=True)
+    if membre.id == t["user_id"] or membre.bot:
+        return await interaction.response.send_message("Cette personne ne peut pas être modifiée ici.", ephemeral=True)
+    try:
+        if add:
+            await interaction.channel.set_permissions(
+                membre, view_channel=True, send_messages=True, attach_files=True, read_message_history=True,
+                reason=f"Ajouté au ticket #{t['id']} par {interaction.user}",
+            )
+        else:
+            await interaction.channel.set_permissions(membre, overwrite=None, reason=f"Retiré du ticket #{t['id']} par {interaction.user}")
+    except discord.HTTPException:
+        return await interaction.response.send_message("🚫 Je n'ai pas pu modifier les permissions du salon.", ephemeral=True)
+    await interaction.response.send_message(
+        f"{'➕' if add else '➖'} {membre.mention} {'ajouté au' if add else 'retiré du'} ticket.",
+        allowed_mentions=discord.AllowedMentions(users=[membre]),
+    )
+
+
+@ticket_group.command(name="ajouter", description="(staff) Ajoute un membre au ticket actuel")
+@app_commands.describe(membre="Le membre à ajouter")
+async def ticket_ajouter(interaction: discord.Interaction, membre: discord.Member):
+    await _ticket_member_edit(interaction, membre, True)
+
+
+@ticket_group.command(name="retirer", description="(staff) Retire un membre du ticket actuel")
+@app_commands.describe(membre="Le membre à retirer")
+async def ticket_retirer(interaction: discord.Interaction, membre: discord.Member):
+    await _ticket_member_edit(interaction, membre, False)
+
+
+bot.tree.add_command(ticket_group)
+
+
+# =====================================================================
+# 📣 /annonce : publier une annonce (embed) avec mention optionnelle
+# =====================================================================
+class AnnonceModal(SafeModal, title="📣 Nouvelle annonce"):
+    titre = discord.ui.TextInput(label="Titre", max_length=200, placeholder="Ex : Soirée gaming ce samedi !")
+    texte = discord.ui.TextInput(
+        label="Message", style=discord.TextStyle.paragraph, max_length=3500,
+        placeholder="Le contenu de l'annonce (retours à la ligne autorisés).",
+    )
+
+    def __init__(self, salon: discord.TextChannel, ping: str, role: Optional[discord.Role], image: Optional[discord.Attachment]):
+        super().__init__()
+        self.salon, self.ping, self.role, self.image = salon, ping, role, image
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        embed = discord.Embed(title=str(self.titre), description=str(self.texte), color=COLOR_PINK)
+        embed.set_footer(text=f"📣 Annonce • {interaction.user.display_name}")
+        embed.timestamp = discord.utils.utcnow()
+        file = None
+        if self.image is not None:
+            try:
+                file = await self.image.to_file()
+                embed.set_image(url=f"attachment://{file.filename}")
+            except discord.HTTPException:
+                file = None
+        content = {"everyone": "@everyone", "here": "@here"}.get(self.ping) or (self.role.mention if self.role else None)
+        mentions = discord.AllowedMentions(
+            everyone=self.ping in ("everyone", "here"), roles=[self.role] if self.role else False, users=False
+        )
+        try:
+            msg = await self.salon.send(content=content, embed=embed, file=file, allowed_mentions=mentions)
+        except discord.HTTPException:
+            return await interaction.followup.send(f"🚫 Je n'ai pas pu publier dans {self.salon.mention}.", ephemeral=True)
+        if self.salon.is_news():  # salon d'annonces : on diffuse aux serveurs abonnés
+            try:
+                await msg.publish()
+            except discord.HTTPException:
+                pass
+        await interaction.followup.send(f"✅ Annonce publiée : {msg.jump_url}", ephemeral=True)
+        await log_cmd(interaction, "annonce", f"Salon : {self.salon.mention}\nTitre : {self.titre}\nPing : {content or 'aucun'}")
+
+
+@bot.tree.command(name="annonce", description="(staff) Publie une annonce dans un salon 📣")
+@app_commands.describe(
+    salon="Salon où publier (ici par défaut)", ping="Qui mentionner", role="Le rôle à mentionner (si ping = Un rôle)",
+    image="Image à joindre (optionnel)",
+)
+@app_commands.choices(ping=[
+    app_commands.Choice(name="Personne", value="none"), app_commands.Choice(name="@everyone", value="everyone"),
+    app_commands.Choice(name="@here", value="here"), app_commands.Choice(name="Un rôle", value="role"),
+])
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@staff_only
+async def annonce(
+    interaction: discord.Interaction, salon: Optional[discord.TextChannel] = None,
+    ping: Optional[app_commands.Choice[str]] = None, role: Optional[discord.Role] = None,
+    image: Optional[discord.Attachment] = None,
+):
+    channel = salon or interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        return await interaction.response.send_message("📣 Choisis un salon textuel.", ephemeral=True)
+    p = channel.permissions_for(interaction.guild.me)
+    if not (p.send_messages and p.embed_links):
+        return await interaction.response.send_message(
+            f"🚫 Il me manque « Envoyer des messages » et « Intégrer des liens » dans {channel.mention}.", ephemeral=True
+        )
+    mode = ping.value if ping else "none"
+    can_mass = interaction.user.guild_permissions.mention_everyone
+    if mode in ("everyone", "here") and not can_mass:
+        return await interaction.response.send_message("🚫 Il te faut la permission « Mentionner @everyone » pour ça.", ephemeral=True)
+    if mode == "role":
+        if role is None:
+            return await interaction.response.send_message("Indique le `role` à mentionner.", ephemeral=True)
+        if not role.mentionable and not can_mass:
+            return await interaction.response.send_message("🚫 Ce rôle n'est pas mentionnable et tu n'as pas la permission de forcer.", ephemeral=True)
+    else:
+        role = None
+    if image is not None and not (image.content_type or "").startswith("image/"):
+        return await interaction.response.send_message("🖼️ Le fichier joint doit être une image.", ephemeral=True)
+    await interaction.response.send_modal(AnnonceModal(channel, mode, role, image))
+
+
+# =====================================================================
+# 🧹 /purge : supprimer un nombre précis de messages
+# =====================================================================
+PURGE_MAX = 500
+
+
+async def do_purge(channel: discord.TextChannel, nombre: int, membre: Optional[discord.Member], reason: str) -> int:
+    """Supprime jusqu'à `nombre` messages (les plus récents d'abord, épinglés épargnés, < 14 jours)."""
+    count = 0
+
+    def check(m: discord.Message) -> bool:
+        nonlocal count
+        if m.pinned or count >= nombre or (membre is not None and m.author.id != membre.id):
+            return False
+        count += 1
+        return True
+
+    limit = min(1000, nombre * 10) if membre else min(1000, nombre + 50)
+    after = discord.utils.utcnow() - timedelta(days=13, hours=23)  # Discord refuse la suppression en masse > 14 jours
+    deleted = await channel.purge(limit=limit, check=check, after=after, oldest_first=False, reason=reason)
+    return len(deleted)
+
+
+async def run_purge_cmd(interaction: discord.Interaction, channel: discord.TextChannel, nombre: int, membre: Optional[discord.Member]) -> str:
+    reason = f"/purge par {interaction.user} ({interaction.user.id})"
+    try:
+        n = await do_purge(channel, nombre, membre, reason)
+        msg = f"🧹 **{n}** message(s) supprimé(s) dans {channel.mention}" + (f" (de {membre.mention})" if membre else "") + "."
+        if n < nombre:
+            msg += "\n*Moins que demandé : les messages épinglés et ceux de plus de 14 jours ne sont pas supprimés.*"
+        status = "✅ Exécutée"
+    except discord.Forbidden:
+        n, msg, status = 0, "🚫 Je n'ai pas la permission de supprimer des messages ici.", "❌ Refusée par Discord"
+    except discord.HTTPException:
+        n, msg, status = 0, "😅 Discord a refusé la suppression, réessaie.", "❌ Erreur Discord"
+    spawn(log_cmd(
+        interaction, "purge",
+        f"Salon : {channel.mention}\nDemandé : {nombre} • Supprimés : {n}" + (f"\nCible : {membre.mention}" if membre else ""),
+        status,
+    ))
+    return msg
+
+
+class PurgeConfirm(_OwnerView):
+    def __init__(self, invoker_id: int, channel: discord.TextChannel, nombre: int, membre: Optional[discord.Member]):
+        super().__init__(invoker_id)
+        self.channel, self.nombre, self.membre = channel, nombre, membre
+
+    @discord.ui.button(label="Oui, supprimer", emoji="🧹", style=discord.ButtonStyle.danger)
+    async def b_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🧹 Suppression en cours…", view=None)
+        msg = await run_purge_cmd(interaction, self.channel, self.nombre, self.membre)
+        await interaction.edit_original_response(content=msg)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Rien n'a été supprimé 🖤", view=None)
+
+
+@bot.tree.command(name="purge", description="(staff) Supprime un nombre de messages 🧹")
+@app_commands.describe(
+    nombre=f"Combien de messages supprimer (1 à {PURGE_MAX})",
+    membre="Ne supprimer que les messages de ce membre", salon="Salon à nettoyer (ici par défaut)",
+)
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
+async def purge_cmd(
+    interaction: discord.Interaction, nombre: app_commands.Range[int, 1, PURGE_MAX],
+    membre: Optional[discord.Member] = None, salon: Optional[discord.TextChannel] = None,
+):
+    channel = salon or interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        return await interaction.response.send_message("🧹 Je ne peux nettoyer que des salons textuels.", ephemeral=True)
+    mine, yours = channel.permissions_for(interaction.guild.me), channel.permissions_for(interaction.user)
+    if not (mine.manage_messages and mine.read_message_history):
+        return await interaction.response.send_message(
+            f"🚫 Il me manque « Gérer les messages » et « Voir les anciens messages » dans {channel.mention}.", ephemeral=True
+        )
+    if not yours.manage_messages:
+        return await interaction.response.send_message(f"🚫 Tu n'as pas « Gérer les messages » dans {channel.mention}.", ephemeral=True)
+    if nombre > 100:  # gros nettoyage : confirmation obligatoire (irréversible)
+        return await interaction.response.send_message(
+            f"⚠️ Supprimer **{nombre}** messages dans {channel.mention}" + (f" de {membre.mention}" if membre else "")
+            + " ? C'est irréversible.",
+            view=PurgeConfirm(interaction.user.id, channel, nombre, membre), ephemeral=True,
+        )
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send(await run_purge_cmd(interaction, channel, nombre, membre), ephemeral=True)
+
+
+# =====================================================================
+# 🗑️ /supprimersalon : supprimer un salon ou une catégorie (avec confirmation + log)
+# =====================================================================
+def channel_kind(ch) -> str:
+    if isinstance(ch, discord.CategoryChannel):
+        return "📁 catégorie"
+    if isinstance(ch, (discord.VoiceChannel, discord.StageChannel)):
+        return "🔊 salon vocal"
+    if isinstance(ch, discord.ForumChannel):
+        return "🗂️ forum"
+    return "💬 salon"
+
+
+class ChannelDeleteConfirm(_OwnerView):
+    def __init__(self, invoker_id: int, channel, sub: list):
+        super().__init__(invoker_id)
+        self.channel, self.sub = channel, sub  # sub = salons de la catégorie à supprimer aussi
+
+    @discord.ui.button(label="Oui, supprimer", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def b_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🗑️ Suppression en cours…", view=None)
+        guild = interaction.guild
+        reason = f"/supprimersalon par {interaction.user} ({interaction.user.id})"[:500]
+        deleted, errors = [], []
+        for ch in [*self.sub, self.channel]:
+            try:
+                await ch.delete(reason=reason)
+                deleted.append(f"{channel_kind(ch)} **{ch.name}**")
+            except discord.Forbidden:
+                errors.append(f"« {ch.name} » : permission refusée")
+            except discord.HTTPException as e:
+                errors.append(f"« {ch.name} » : {str(e.text)[:60]}")
+            await asyncio.sleep(0.3)
+        le = discord.Embed(title="🗑️ Suppression de salon", color=COLOR_DARK)
+        le.add_field(name="Staff", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+        le.add_field(name="Supprimés", value=("\n".join(deleted) or "—")[:1000], inline=False)
+        if errors:
+            le.add_field(name="Erreurs", value="\n".join(errors)[:1000], inline=False)
+        le.timestamp = discord.utils.utcnow()
+        await mod_log(guild, le)
+        msg = f"🗑️ Supprimé : {', '.join(deleted) or 'rien'}."
+        if errors:
+            msg += "\n⚠️ " + "\n⚠️ ".join(errors[:5])
+        try:  # le salon où la commande a été lancée a pu être supprimé
+            await interaction.edit_original_response(content=msg[:1900])
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Rien n'a été supprimé 🖤", view=None)
+
+
+@bot.tree.command(name="supprimersalon", description="(staff) Supprime un salon ou une catégorie 🗑️")
+@app_commands.describe(
+    salon="Le salon, vocal, forum ou la catégorie à supprimer",
+    contenu="Catégorie : supprimer AUSSI les salons qu'elle contient (sinon ils sont conservés, sans catégorie)",
+)
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def supprimersalon(interaction: discord.Interaction, salon: discord.abc.GuildChannel, contenu: bool = False):
+    guild = interaction.guild
+    if salon.id in (getattr(guild.rules_channel, "id", 0), getattr(guild.public_updates_channel, "id", 0)):
+        return await interaction.response.send_message(
+            "🚫 Ce salon est utilisé par la fonction Communauté de Discord (règles / mises à jour) : "
+            "change-le dans les réglages du serveur avant.", ephemeral=True,
+        )
+    sub = list(salon.channels) if (contenu and isinstance(salon, discord.CategoryChannel)) else []
+    for ch in [salon, *sub]:
+        if not ch.permissions_for(guild.me).manage_channels:
+            return await interaction.response.send_message(f"🚫 Il me manque « Gérer les salons » sur {ch.mention}.", ephemeral=True)
+        if not ch.permissions_for(interaction.user).manage_channels:
+            return await interaction.response.send_message(f"🚫 Tu n'as pas « Gérer les salons » sur {ch.mention}.", ephemeral=True)
+    txt = f"⚠️ Supprimer le/la {channel_kind(salon)} **{salon.name}** ? C'est **irréversible**."
+    if isinstance(salon, discord.CategoryChannel):
+        if sub:
+            txt += f"\n🗑️ Les **{len(sub)}** salon(s) dedans seront supprimés aussi : " + ", ".join(f"`{c.name}`" for c in sub[:15])
+        elif salon.channels:
+            txt += f"\n📌 Les {len(salon.channels)} salon(s) dedans seront **conservés** (ils n'auront plus de catégorie). Mets `contenu:True` pour les supprimer."
+    await interaction.response.send_message(
+        txt[:1900], view=ChannelDeleteConfirm(interaction.user.id, salon, sub), ephemeral=True
+    )
+
+
+# =====================================================================
+# 🎭 /role creer | supprimer
+# =====================================================================
+role_group = app_commands.Group(
+    name="role", description="(staff) Créer ou supprimer des rôles 🎭",
+    guild_only=True, default_permissions=discord.Permissions(manage_roles=True),
+)
+manage_roles_only = app_commands.checks.has_permissions(manage_roles=True)
+COLOR_HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
+ROLE_PRESET_CHOICES = [
+    app_commands.Choice(name="Aucune permission (par défaut)", value="aucune"),
+    app_commands.Choice(name="👤 Membre", value="membre"),
+    app_commands.Choice(name="💎 VIP", value="vip"),
+    app_commands.Choice(name="🛡️ Staff (modération)", value="staff"),
+    app_commands.Choice(name="🤐 Muet (lecture seule)", value="muet"),
+]
+
+
+@role_group.command(name="creer", description="Crée un rôle")
+@app_commands.describe(
+    nom="Nom du rôle", couleur="Couleur hexadécimale, ex : #FF7AB8",
+    permissions="Un jeu de permissions prêt à l'emploi (jamais « Administrateur »)",
+    affiche="Afficher séparément dans la liste des membres", mentionnable="Tout le monde peut le mentionner",
+    membre="Donner tout de suite le rôle à ce membre (optionnel)",
+)
+@app_commands.choices(permissions=ROLE_PRESET_CHOICES)
+@manage_roles_only
+async def role_creer(
+    interaction: discord.Interaction, nom: app_commands.Range[str, 1, 100], couleur: Optional[str] = None,
+    permissions: Optional[app_commands.Choice[str]] = None, affiche: bool = False, mentionnable: bool = False,
+    membre: Optional[discord.Member] = None,
+):
+    guild, me, inv = interaction.guild, interaction.guild.me, interaction.user
+    if not me.guild_permissions.manage_roles:
+        return await interaction.response.send_message("🚫 Il me manque la permission « Gérer les rôles ».", ephemeral=True)
+    if len(guild.roles) >= 250:
+        return await interaction.response.send_message("🚫 Limite de 250 rôles atteinte.", ephemeral=True)
+    colour = discord.Colour.default()
+    if couleur:
+        m = COLOR_HEX_RE.match(couleur.strip())
+        if not m:
+            return await interaction.response.send_message("🎨 Couleur invalide : utilise le format `#RRGGBB`.", ephemeral=True)
+        colour = discord.Colour(int(m.group(1), 16))
+    preset = permissions.value if permissions else "aucune"
+    perms = ROLE_PRESETS.get(preset, discord.Permissions.none())
+    # anti-escalade : on ne peut pas créer un rôle avec des permissions qu'on n'a pas soi-même
+    if inv.id != guild.owner_id and not inv.guild_permissions.administrator and not perms.is_subset(inv.guild_permissions):
+        return await interaction.response.send_message("🚫 Tu ne peux pas créer un rôle avec des permissions que tu n'as pas toi-même.", ephemeral=True)
+    if not perms.is_subset(me.guild_permissions):
+        return await interaction.response.send_message("🚫 Je ne peux pas donner des permissions que je n'ai pas moi-même.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        role = await guild.create_role(
+            name=nom.strip(), colour=colour, hoist=affiche, mentionable=mentionnable, permissions=perms,
+            reason=f"/role creer par {inv} ({inv.id})"[:500],
+        )
+    except discord.Forbidden:
+        return await interaction.followup.send("🚫 Discord me refuse ça : vérifie mes permissions.", ephemeral=True)
+    except discord.HTTPException as e:
+        return await interaction.followup.send(f"😅 Discord a refusé : {str(e.text)[:150]}", ephemeral=True)
+    note = ""
+    if membre is not None:
+        block = punish_block_reason(interaction, membre)
+        if block:
+            note = f"\n⚠️ Rôle non donné : {block}"
+        else:
+            try:
+                await (guild.get_member(membre.id) or membre).add_roles(role, reason=f"/role creer par {inv}"[:500])
+                note = f"\n🎀 Donné à {membre.mention}."
+            except discord.HTTPException:
+                note = "\n⚠️ Je n'ai pas pu donner le rôle."
+    le = discord.Embed(title="🎭 Rôle créé", color=colour.value or COLOR_PINK)
+    le.add_field(name="Rôle", value=f"{role.mention} (`{role.id}`)", inline=True)
+    le.add_field(name="Staff", value=f"{inv.mention} (`{inv.id}`)", inline=True)
+    le.add_field(name="Permissions", value=preset, inline=True)
+    le.timestamp = discord.utils.utcnow()
+    await mod_log(guild, le)
+    await interaction.followup.send(
+        f"✅ Rôle {role.mention} créé (en bas de la hiérarchie : remonte-le dans les réglages si besoin).{note}", ephemeral=True
+    )
+
+
+def role_delete_problem(interaction: discord.Interaction, role: discord.Role) -> Optional[str]:
+    guild, me, inv = interaction.guild, interaction.guild.me, interaction.user
+    if role.is_default():
+        return "@everyone ne peut pas être supprimé."
+    if role.managed:
+        return f"« {role.name} » est géré par un bot / une intégration."
+    if role >= me.top_role:
+        return f"« {role.name} » est au-dessus de mon rôle : monte mon rôle dans la hiérarchie."
+    if inv.id != guild.owner_id and role >= inv.top_role:
+        return f"« {role.name} » est au même niveau que ton rôle, ou au-dessus."
+    return None
+
+
+class RoleDeleteConfirm(_OwnerView):
+    def __init__(self, invoker_id: int, role: discord.Role):
+        super().__init__(invoker_id)
+        self.role = role
+
+    @discord.ui.button(label="Oui, supprimer", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def b_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role, guild = self.role, interaction.guild
+        problem = role_delete_problem(interaction, role)
+        if problem:
+            return await interaction.response.edit_message(content=f"🚫 {problem}", view=None)
+        n, name = len(role.members), role.name
+        try:
+            await role.delete(reason=f"/role supprimer par {interaction.user} ({interaction.user.id})"[:500])
+        except discord.Forbidden:
+            return await interaction.response.edit_message(content="🚫 Discord me refuse ça : vérifie mes permissions.", view=None)
+        except discord.HTTPException as e:
+            return await interaction.response.edit_message(content=f"😅 Discord a refusé : {str(e.text)[:150]}", view=None)
+        le = discord.Embed(title="🎭 Rôle supprimé", color=COLOR_DARK)
+        le.add_field(name="Rôle", value=f"{name} (`{role.id}`)", inline=True)
+        le.add_field(name="Staff", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
+        le.add_field(name="Membres concernés", value=str(n), inline=True)
+        le.timestamp = discord.utils.utcnow()
+        await mod_log(guild, le)
+        await interaction.response.edit_message(content=f"🗑️ Rôle **{name}** supprimé ({n} membre(s) concerné(s)).", view=None)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Rôle conservé 🖤", view=None)
+
+
+@role_group.command(name="supprimer", description="Supprime un rôle")
+@app_commands.describe(role="Le rôle à supprimer")
+@manage_roles_only
+async def role_supprimer(interaction: discord.Interaction, role: discord.Role):
+    problem = role_delete_problem(interaction, role)
+    if problem:
+        return await interaction.response.send_message(f"🚫 {problem}", ephemeral=True)
+    await interaction.response.send_message(
+        f"⚠️ Supprimer le rôle {role.mention} ? Il sera retiré à **{len(role.members)}** membre(s). C'est **irréversible**.\n"
+        "_Les panneaux `/rolereaction` qui l'utilisent cesseront de fonctionner pour ce rôle._",
+        view=RoleDeleteConfirm(interaction.user.id, role), ephemeral=True, allowed_mentions=NO_PINGS,
+    )
+
+
+bot.tree.add_command(role_group)
+
+
+# =====================================================================
+# 🧠 QUIZ PERSO : /quizperso creer | jouer | liste | supprimer
+#   Les membres créent leurs quiz (1 bonne réponse + 1 à 3 mauvaises). Ils ne comptent pas dans le classement.
+# =====================================================================
+QUIZ_MAX_PER_USER = 20
+QUIZ_MAX_PER_GUILD = 200
+
+
+async def quiz_limit_error(interaction: discord.Interaction) -> Optional[str]:
+    gid, uid = interaction.guild_id, interaction.user.id
+    total = (await db_all("SELECT COUNT(*) FROM quizzes WHERE guild_id=?", (gid,)))[0][0]
+    mine = (await db_all("SELECT COUNT(*) FROM quizzes WHERE guild_id=? AND author_id=?", (gid, uid)))[0][0]
+    if total >= QUIZ_MAX_PER_GUILD:
+        return f"🧠 Le serveur a atteint la limite de {QUIZ_MAX_PER_GUILD} quiz."
+    if mine >= QUIZ_MAX_PER_USER and not interaction.permissions.manage_guild:
+        return f"🧠 Tu as déjà {QUIZ_MAX_PER_USER} quiz : supprime-en un avec `/quizperso supprimer`."
+    return None
+
+
+class QuizCreateModal(SafeModal, title="🧠 Créer un quiz"):
+    question = discord.ui.TextInput(label="Question", style=discord.TextStyle.paragraph, max_length=200)
+    bonne = discord.ui.TextInput(label="Bonne réponse", max_length=80)
+    mauvaises = discord.ui.TextInput(
+        label="Mauvaises réponses (1 à 3, une par ligne)", style=discord.TextStyle.paragraph, max_length=260,
+        placeholder="Une mauvaise réponse par ligne",
+    )
+    anecdote = discord.ui.TextInput(label="Anecdote affichée à la fin (optionnel)", required=False, max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        err = await quiz_limit_error(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        question, bonne = self.question.value.strip(), self.bonne.value.strip()
+        wrongs: list[str] = []
+        for w in re.split(r"[\n|;]", self.mauvaises.value):
+            w = w.strip()
+            if w and w.casefold() != bonne.casefold() and w.casefold() not in {x.casefold() for x in wrongs}:
+                wrongs.append(w)
+        if not question or not bonne:
+            return await interaction.response.send_message("🧠 La question et la bonne réponse sont obligatoires.", ephemeral=True)
+        if not 1 <= len(wrongs) <= 3 or any(len(w) > 80 for w in wrongs):
+            return await interaction.response.send_message(
+                "🧠 Il faut **1 à 3** mauvaises réponses, différentes de la bonne (80 caractères max), une par ligne.",
+                ephemeral=True,
+            )
+        cur = await bot.db.execute(
+            "INSERT INTO quizzes(guild_id, author_id, question, answer, wrongs, anecdote, created_at) VALUES (?,?,?,?,?,?,?)",
+            (interaction.guild_id, interaction.user.id, question, bonne,
+             json.dumps(wrongs, ensure_ascii=False), self.anecdote.value.strip(), int(time.time())),
+        )
+        await bot.db.commit()
+        await interaction.response.send_message(
+            f"✅ Quiz **#{cur.lastrowid}** créé ! Lance-le avec `/quizperso jouer numero:{cur.lastrowid}` "
+            "(tu ne pourras pas y répondre toi-même 😏).", ephemeral=True,
+        )
+
+
+quizperso_group = app_commands.Group(name="quizperso", description="Quiz créés par les membres 🧠", guild_only=True)
+
+
+@quizperso_group.command(name="creer", description="Crée ton propre quiz")
+async def quizperso_creer(interaction: discord.Interaction):
+    err = await quiz_limit_error(interaction)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    await interaction.response.send_modal(QuizCreateModal())
+
+
+@quizperso_group.command(name="jouer", description="Lance un quiz créé par un membre")
+@app_commands.describe(numero="Numéro du quiz (au hasard si tu ne mets rien)")
+@app_commands.checks.cooldown(1, 6.0, key=lambda i: i.user.id)
+async def quizperso_jouer(interaction: discord.Interaction, numero: Optional[int] = None):
+    cols = "SELECT id, author_id, question, answer, wrongs, anecdote FROM quizzes WHERE guild_id=?"
+    if numero is not None:
+        rows = await db_all(cols + " AND id=?", (interaction.guild_id, numero))
+    else:
+        rows = await db_all(cols + " ORDER BY RANDOM() LIMIT 1", (interaction.guild_id,))
+    if not rows:
+        msg = "❌ Ce quiz n'existe pas." if numero is not None else "Aucun quiz sur le serveur. Crée le premier avec `/quizperso creer` 😏"
+        return await interaction.response.send_message(msg, ephemeral=True)
+    qid, author, question, bonne, wrongs_json, anecdote = rows[0]
+    choix = [bonne, *json.loads(wrongs_json)]
+    random.shuffle(choix)
+    header = f"🧠 **Quiz #{qid}** (par <@{author}>)\n{question}\n*(30 s, le premier qui trouve gagne • hors classement)*"
+    view = QuizView(header, bonne, choix, anecdote, author_id=author, ranked=False)
+    await interaction.response.send_message(header, view=view, allowed_mentions=NO_PINGS)
+    view.message = await interaction.original_response()
+
+
+@quizperso_group.command(name="liste", description="Liste les quiz du serveur")
+@app_commands.describe(mes_quiz="Ne voir que les miens")
+async def quizperso_liste(interaction: discord.Interaction, mes_quiz: bool = False):
+    sql, params = "SELECT id, author_id, question FROM quizzes WHERE guild_id=?", (interaction.guild_id,)
+    if mes_quiz:
+        sql += " AND author_id=?"
+        params += (interaction.user.id,)
+    rows = await db_all(sql + " ORDER BY id DESC LIMIT 25", params)
+    if not rows:
+        return await interaction.response.send_message("Aucun quiz pour l'instant. `/quizperso creer` 😏", ephemeral=True)
+    lines = [f"`#{i}` — {q.replace(chr(10), ' ')[:70]}{'…' if len(q) > 70 else ''} · <@{a}>" for i, a, q in rows]
+    await interaction.response.send_message(
+        embed=emb(f"🧠 Quiz du serveur ({len(rows)} derniers)", "\n".join(lines)[:4000], COLOR_PINK),
+        ephemeral=True, allowed_mentions=NO_PINGS,
+    )
+
+
+@quizperso_group.command(name="supprimer", description="Supprime un de tes quiz (ou n'importe lequel si tu es staff)")
+@app_commands.describe(numero="Numéro du quiz (voir /quizperso liste)")
+async def quizperso_supprimer(interaction: discord.Interaction, numero: int):
+    rows = await db_all("SELECT author_id FROM quizzes WHERE guild_id=? AND id=?", (interaction.guild_id, numero))
+    if not rows:
+        return await interaction.response.send_message("❌ Ce quiz n'existe pas.", ephemeral=True)
+    if rows[0][0] != interaction.user.id and not interaction.permissions.manage_messages:
+        return await interaction.response.send_message("🚫 Ce n'est pas ton quiz.", ephemeral=True)
+    await db_run("DELETE FROM quizzes WHERE guild_id=? AND id=?", (interaction.guild_id, numero))
+    await interaction.response.send_message(f"🗑️ Quiz **#{numero}** supprimé.", ephemeral=True)
+
+
+bot.tree.add_command(quizperso_group)
+
+
+# =====================================================================
+# ✂️ /pfcduel : pierre-feuille-ciseaux contre un autre joueur (mise optionnelle)
+#   Défi → l'adversaire accepte → mises prélevées → chacun choisit en secret → le gagnant empoche le pot.
+#   Égalité : on rejoue (3 manches max, puis mises rendues). Pas de réponse à temps : forfait.
+# =====================================================================
+PFC_DUEL_TIMEOUT = 60
+PFC_MAX_ROUNDS = 3
+
+
+class PFCDuel:
+    def __init__(self, a: discord.Member, b: discord.Member, guild_id: int, bet: int):
+        self.a, self.b, self.gid, self.bet = a, b, guild_id, bet
+        self.round = 1
+        self.choices: dict[int, str] = {}
+        self.finished = False
+        self.lock = asyncio.Lock()
+        self.view: Optional["PFCPlayView"] = None
+        self.message: Optional[discord.Message] = None
+
+    def embed(self, note: str = "") -> discord.Embed:
+        def st(p: discord.Member) -> str:
+            return "✅ a choisi" if p.id in self.choices else "⏳ réfléchit…"
+        desc = (
+            f"{self.a.mention} ⚔️ {self.b.mention}\n"
+            f"Manche **{self.round}/{PFC_MAX_ROUNDS}** : choisis en secret avec les boutons ({PFC_DUEL_TIMEOUT}s).\n\n"
+            f"{self.a.display_name} : {st(self.a)}\n{self.b.display_name} : {st(self.b)}"
+        )
+        if self.bet:
+            desc += f"\n\n💰 Pot : **{self.bet * 2}** {COIN} (le gagnant remporte tout)"
+        if note:
+            desc = f"{note}\n\n{desc}"
+        return emb("✂️ Duel pierre-feuille-ciseaux", desc, COLOR_PURPLE)
+
+    async def _edit(self, interaction: Optional[discord.Interaction], embed: discord.Embed, view):
+        try:
+            if interaction is not None:
+                await interaction.response.edit_message(embed=embed, view=view)
+            elif self.message is not None:
+                await self.message.edit(embed=embed, view=view)
+        except discord.HTTPException:
+            pass
+
+    async def _refund_both(self):
+        if self.bet:
+            for p in (self.a, self.b):
+                await eco_add(self.gid, p.id, self.bet)
+
+    async def _finish(self, winner: Optional[discord.Member], interaction: Optional[discord.Interaction], recap: str):
+        self.finished = True
+        if winner is None:
+            await self._refund_both()
+            spawn(record_many(self.gid, "pfc", {self.a.id: "draw", self.b.id: "draw"}))
+            desc = f"{recap}\n\n🤝 Égalité : personne ne gagne" + (" et les mises sont rendues." if self.bet else ".")
+            embed = emb("🤝 Duel terminé", desc, COLOR_PINK)
+        else:
+            loser = self.b if winner.id == self.a.id else self.a
+            if self.bet:
+                await eco_add(self.gid, winner.id, self.bet * 2)
+            spawn(record_many(self.gid, "pfc", {winner.id: "win", loser.id: "loss"}))
+            desc = f"{recap}\n\n🏆 {winner.mention} gagne" + (f" **{self.bet * 2}** {COIN}" if self.bet else "") + " ! Sois bon perdant, " + loser.mention + " 😈"
+            embed = emb("🏆 Duel terminé", desc, COLOR_PINK)
+        await self._edit(interaction, embed, None)
+
+    async def resolve(self, interaction: Optional[discord.Interaction]):
+        ca, cb = self.choices[self.a.id], self.choices[self.b.id]
+        recap = f"{self.a.mention} {PFC[ca]} vs {PFC[cb]} {self.b.mention}"
+        if ca == cb:
+            if self.round >= PFC_MAX_ROUNDS:
+                return await self._finish(None, interaction, recap + f"\nÉgalité sur {PFC_MAX_ROUNDS} manches.")
+            self.round += 1
+            self.choices = {}
+            self.view = PFCPlayView(self)
+            return await self._edit(interaction, self.embed(f"🤝 {recap} : égalité, on recommence !"), self.view)
+        await self._finish(self.a if BEATS[ca] == cb else self.b, interaction, recap)
+
+    async def on_timeout(self):
+        self.finished = True
+        if not self.choices:
+            await self._refund_both()
+            return await self._edit(None, emb("⌛ Duel annulé", "Personne n'a joué à temps" + (" : mises rendues." if self.bet else "."), COLOR_DARK), None)
+        self.finished = False  # _finish le remettra à True
+        winner = self.a if self.a.id in self.choices else self.b
+        loser = self.b if winner.id == self.a.id else self.a
+        await self._finish(winner, None, f"💤 {loser.mention} n'a pas joué à temps : forfait.")
+
+
+class PFCPlayView(discord.ui.View):
+    def __init__(self, game: PFCDuel):
+        super().__init__(timeout=PFC_DUEL_TIMEOUT)
+        self.game = game
+
+    async def _pick(self, interaction: discord.Interaction, choice: str):
+        g, uid = self.game, interaction.user.id
+        async with g.lock:
+            if g.view is not self or g.finished:
+                return await interaction.response.send_message("⌛ Cette manche est terminée.", ephemeral=True)
+            if uid not in (g.a.id, g.b.id):
+                return await interaction.response.send_message("Tu ne joues pas ce duel 😏", ephemeral=True)
+            if uid in g.choices:
+                return await interaction.response.send_message("T'as déjà choisi, patience 😌", ephemeral=True)
+            g.choices[uid] = choice
+            if len(g.choices) < 2:
+                await interaction.response.edit_message(embed=g.embed(), view=self)
+                return await interaction.followup.send(f"Tu as choisi {PFC[choice]} **{choice}**. J'attends l'autre… 🤫", ephemeral=True)
+            self.stop()
+            await g.resolve(interaction)
+
+    @discord.ui.button(label="Pierre", emoji="🪨", style=discord.ButtonStyle.primary)
+    async def b_pierre(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "pierre")
+
+    @discord.ui.button(label="Feuille", emoji="📄", style=discord.ButtonStyle.primary)
+    async def b_feuille(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "feuille")
+
+    @discord.ui.button(label="Ciseaux", emoji="✂️", style=discord.ButtonStyle.primary)
+    async def b_ciseaux(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "ciseaux")
+
+    async def on_timeout(self):
+        g = self.game
+        async with g.lock:
+            if g.view is not self or g.finished:
+                return
+            await g.on_timeout()
+
+
+class PFCChallengeView(discord.ui.View):
+    def __init__(self, challenger: discord.Member, opponent: discord.Member, bet: int):
+        super().__init__(timeout=120)
+        self.challenger, self.opponent, self.bet = challenger, opponent, bet
+        self.done = False
+        self.message: Optional[discord.Message] = None
+
+    @discord.ui.button(label="Accepter", emoji="✅", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            return await interaction.response.send_message("Ce défi ne t'est pas adressé 😏", ephemeral=True)
+        if self.done:
+            return await interaction.response.send_message("Ce défi est déjà réglé.", ephemeral=True)
+        self.done = True
+        self.stop()
+        gid, paid = interaction.guild_id, []
+        if self.bet:
+            for p in (self.challenger, self.opponent):
+                if await eco_charge(gid, p.id, self.bet):
+                    paid.append(p)
+                else:
+                    for q in paid:
+                        await eco_add(gid, q.id, self.bet)
+                    return await interaction.response.edit_message(
+                        content=None, view=None,
+                        embed=emb("✂️ Défi annulé", f"{p.mention} n'a plus assez de pièces pour la mise.", COLOR_DARK),
+                    )
+        game = PFCDuel(self.challenger, self.opponent, gid, self.bet)
+        game.view = PFCPlayView(game)
+        await interaction.response.edit_message(content=None, embed=game.embed(), view=game.view)
+        game.message = await interaction.original_response()
+
+    @discord.ui.button(label="Refuser", emoji="💔", style=discord.ButtonStyle.danger)
+    async def refuse(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in (self.challenger.id, self.opponent.id):
+            return await interaction.response.send_message("Ce défi ne te concerne pas 😏", ephemeral=True)
+        if self.done:
+            return await interaction.response.send_message("Ce défi est déjà réglé.", ephemeral=True)
+        self.done = True
+        self.stop()
+        txt = "Défi annulé." if interaction.user.id == self.challenger.id else f"{self.opponent.mention} refuse le défi. Poule mouillée 😏"
+        await interaction.response.edit_message(content=None, embed=emb("✂️ Défi refusé", txt, COLOR_DARK), view=None)
+
+    async def on_timeout(self):
+        if self.done or not self.message:
+            return
+        try:
+            await self.message.edit(content=None, embed=emb("⌛ Défi expiré", "Personne n'a répondu à temps.", COLOR_DARK), view=None)
+        except discord.HTTPException:
+            pass
+
+
+@bot.tree.command(name="pfcduel", description="Défie quelqu'un au pierre-feuille-ciseaux, avec mise possible ✂️")
+@app_commands.describe(adversaire="La personne à défier", mise="Mise en pièces (0 = sans mise, économie à activer avec /ecopanel)")
+@app_commands.guild_only()
+@app_commands.checks.cooldown(1, 10.0, key=lambda i: i.user.id)
+async def pfcduel(
+    interaction: discord.Interaction, adversaire: discord.Member,
+    mise: app_commands.Range[int, 0, 1_000_000_000] = 0,
+):
+    user, gid = interaction.user, interaction.guild_id
+    if adversaire.bot:
+        return await interaction.response.send_message("Pour jouer contre moi, c'est `/pfc` 😏", ephemeral=True)
+    if adversaire.id == user.id:
+        return await interaction.response.send_message("Tu ne peux pas te défier toi-même 😅", ephemeral=True)
+    err = await bet_error(gid, user.id, mise)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    if mise and await eco_balance(gid, adversaire.id) < mise:
+        return await interaction.response.send_message(
+            f"💸 {adversaire.display_name} n'a pas assez de pièces pour miser **{mise}** {COIN}.", ephemeral=True
+        )
+    view = PFCChallengeView(user, adversaire, mise)
+    bet_txt = f" pour **{mise}** {COIN} chacun" if mise else " (pour l'honneur)"
+    embed = emb("✂️ Défi pierre-feuille-ciseaux", f"{user.mention} défie {adversaire.mention}{bet_txt} !\nTu as 2 minutes pour répondre.", COLOR_PINK)
+    await interaction.response.send_message(content=adversaire.mention, embed=embed, view=view, allowed_mentions=USER_PINGS)
+    view.message = await interaction.original_response()
+
+
+# =====================================================================
+# ⚙️ CONFIG UNIFIÉ (/adminpanel) • 📜 TYPES DE LOGS • 🎯 KAHOOT • 🎮 PANEL /jeux
+#   Bloc inséré automatiquement par patch_mika.py, juste avant « RÉACTIONS AUX MESSAGES ».
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 📜 Types de logs sélectionnables
+# ---------------------------------------------------------------------
+LOG_CATS = {  # clé : (libellé, activé par défaut)
+    "sanctions": ("🔨 Sanctions (mute, kick, ban, avertissement, vocal)", True),
+    "commandes": ("📋 Commandes du bot (slash, panels, !nom)", True),
+    "roles": ("🎭 Rôles (donnés, retirés, créés, supprimés, panneaux)", True),
+    "automod": ("🛡️ Auto-modération", True),
+    "tickets": ("🎫 Tickets (ouverture, fermeture, transcripts)", True),
+    "admin": ("🛠️ Actions admin (envoyer, salons, serveur IA)", True),
+    "arrivees": ("👋 Arrivées et départs de membres", False),
+    "messages": ("💬 Messages supprimés / modifiés", False),
+    "vocal": ("🎙️ Activité vocale (connexion, départ, déplacement)", False),
+}
+
+
+async def log_cat_enabled(gid: int, cat: str) -> bool:
+    return await get_flag(gid, f"logc_{cat}", LOG_CATS.get(cat, ("", True))[1])
+
+
+def guess_log_cat(embed: discord.Embed) -> str:
+    """Déduit le type d'un log à partir de son titre (les anciens appels de mod_log n'ont pas à changer)."""
+    t = (embed.title or "").lower()
+    if "auto-mod" in t:
+        return "automod"
+    if "commande" in t:
+        return "commandes"
+    if "ticket" in t:
+        return "tickets"
+    if "sanction" in t:
+        return "sanctions"
+    if "rôle" in t or "role" in t:
+        return "roles"
+    return "admin"
+
+
+async def join_log(member: discord.Member):
+    e = discord.Embed(title="👋 Arrivée", color=COLOR_PINK)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.add_field(name="Membre", value=f"{member.mention} (`{member.id}`)", inline=True)
+    e.add_field(name="Compte créé", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=True)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(member.guild, e, "arrivees")
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    if member.bot:
+        return
+    e = discord.Embed(title="🚪 Départ", color=COLOR_DARK)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.add_field(name="Membre", value=f"{member} (`{member.id}`)", inline=True)
+    if member.joined_at:
+        e.add_field(name="Était là depuis", value=f"<t:{int(member.joined_at.timestamp())}:R>", inline=True)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(member.guild, e, "arrivees")
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.guild is None or message.author.bot:
+        return
+    if message.channel.id == await get_int(message.guild.id, "log_channel"):
+        return
+    e = discord.Embed(title="🗑️ Message supprimé", color=COLOR_DARK)
+    e.add_field(name="Auteur", value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+    e.add_field(name="Salon", value=getattr(message.channel, "mention", "—"), inline=True)
+    e.add_field(name="Contenu", value=(message.content or "*(vide)*")[:1000], inline=False)
+    if message.attachments:
+        e.add_field(name="Pièces jointes", value=str(len(message.attachments)), inline=True)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(message.guild, e, "messages")
+
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if after.guild is None or after.author.bot or before.content == after.content:
+        return
+    e = discord.Embed(title="✏️ Message modifié", color=COLOR_PURPLE)
+    e.add_field(name="Auteur", value=f"{after.author.mention} (`{after.author.id}`)", inline=True)
+    e.add_field(name="Salon", value=f"{getattr(after.channel, 'mention', '—')} • [lien]({after.jump_url})", inline=True)
+    e.add_field(name="Avant", value=(before.content or "*(vide)*")[:1000], inline=False)
+    e.add_field(name="Après", value=(after.content or "*(vide)*")[:1000], inline=False)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(after.guild, e, "messages")
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot or before.channel == after.channel:
+        return
+    if before.channel is None:
+        txt = f"a rejoint {after.channel.mention}"
+    elif after.channel is None:
+        txt = f"a quitté {before.channel.mention}"
+    else:
+        txt = f"est passé de {before.channel.mention} à {after.channel.mention}"
+    e = discord.Embed(title="🎙️ Activité vocale", description=f"{member.mention} {txt}", color=COLOR_PURPLE)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(member.guild, e, "vocal")
+
+
+# ---------------------------------------------------------------------
+# 🧩 Fonctionnalités activables / désactivables (une famille de commandes = un interrupteur)
+# ---------------------------------------------------------------------
+FEATURES = [  # (clé, libellé, défaut, commandes concernées)
+    ("f_ia", "IA & recherche", True, {"ask", "recherche", "dev"}),
+    ("f_fun", "Taquineries & décisions", True, {"roast", "blague", "8ball", "choisir", "ship"}),
+    ("f_social", "Actions sociales", True, {"kiss", "hug", "pat", "slap", "bonk", "gift"}),
+    ("f_mariage", "Mariage", True, {"marie", "mariage", "divorce"}),
+    ("f_jeux", "Mini-jeux", True, {"pfc", "pfcduel", "blackjack", "poker", "quiz", "quizperso", "jeux",
+                                   "classement", "stat", "reglepoker", "regleblackjack", "main"}),
+    ("f_kahoot", "Kahoot", True, {"kahoot"}),
+    ("f_meteo", "Météo", True, {"meteo"}),
+    ("f_sondage", "Sondages", True, {"sondage"}),
+    ("f_cc", "Commandes perso (/cc)", True, {"cc"}),
+]
+_CMD_FEATURE = {c: k for k, _, _, cmds in FEATURES for c in cmds}
+
+
+async def feature_gate(interaction: discord.Interaction) -> bool:
+    """Vérifié avant CHAQUE commande slash : bloque celles dont la fonctionnalité est coupée dans /adminpanel."""
+    if interaction.guild_id is None or interaction.command is None:
+        return True
+    key = _CMD_FEATURE.get(interaction.command.qualified_name.split()[0])
+    if key and not await get_flag(interaction.guild_id, key, True):
+        await interaction.response.send_message(
+            "🚫 Cette fonctionnalité est désactivée sur ce serveur (un admin peut la réactiver avec `/adminpanel`).",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
+bot.tree.interaction_check = feature_gate
+
+
+async def feature_off(interaction: discord.Interaction, key: str) -> bool:
+    """Pour les boutons de panels (qui n'passent pas par le contrôle des commandes)."""
+    if interaction.guild_id and not await get_flag(interaction.guild_id, key, True):
+        await interaction.response.send_message(
+            "🚫 Cette fonctionnalité est désactivée sur ce serveur (`/adminpanel`).", ephemeral=True
+        )
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------
+# ⚙️ /adminpanel : panneau unique de configuration
+# ---------------------------------------------------------------------
+CFG_PAGES = [  # (clé, titre, description)
+    ("general", "⚙️ Général", "Réactions, rebonds, salutations, réponse au prénom, style de personnalité."),
+    ("fonctions", "🧩 Fonctionnalités", "Active ou coupe chaque famille de commandes du bot."),
+    ("moderation", "🛡️ Modération", "Auto-modération : activation, sanctions et règles."),
+    ("logs", "📜 Logs", "Salon des logs et types de logs à enregistrer."),
+    ("economie", "💰 Économie & accueil", "Pièces, mises, messages de bienvenue."),
+    ("outils", "🛠️ Outils", "Silence, envoi de messages, punitions, rôles, commandes perso, tests."),
+]
+CFG_TOGGLES = {
+    "general": [("reactions", "Réactions emoji", True), ("spontane", "Rebonds spontanés", False),
+                ("salutations", "Salutations", True), ("nom", "Réponse au prénom", True)],
+    "fonctions": [(k, label, d) for k, label, d, _ in FEATURES],
+    "moderation": [("automod", "Auto-modération", False), ("automod_sanctions", "Sanctions auto", True)]
+                  + [(k, label.split(" (")[0], d) for k, label, d in AM_RULES],
+    "economie": [("eco", "Économie", False), ("welcome_on", "Accueil", False), ("welcome_dm", "Accueil en MP", False)],
+}
+
+
+async def cfg_embed(guild: discord.Guild, page: str) -> discord.Embed:
+    gid = guild.id
+    meta = next(p for p in CFG_PAGES if p[0] == page)
+    mark = lambda b: "✅" if b else "❌"  # noqa: E731
+    e = emb(f"⚙️ Configuration — {meta[1]}", meta[2], COLOR_DARK)
+    lines = []
+    if page in CFG_TOGGLES:
+        for key, label, default in CFG_TOGGLES[page]:
+            line = f"{mark(await get_flag(gid, key, default))} **{label}**"
+            if page == "fonctions":
+                cmds = next(c for k, _, _, c in FEATURES if k == key)
+                line += " — " + ", ".join(f"`/{c}`" for c in sorted(cmds))
+            lines.append(line)
+    if page == "general":
+        lines.append(f"🎭 Style : **{STYLES[await get_style(gid)][0]}**")
+        try:
+            until = int(float(await get_setting(gid, "silence_until", "0")))
+        except ValueError:
+            until = 0
+        lines.append(f"🤫 Silence : {f'jusqu’à <t:{until}:R>' if until > time.time() else 'inactif'}")
+    elif page == "moderation":
+        lines.append(f"🚫 Mots interdits : **{len(await am_words(gid))}** (liste gérée avec `/automod mot`)")
+        lines.append("📈 1ʳᵉ infraction : avertissement • 2ᵉ : mute 5 min • 3ᵉ : 30 min • 4ᵉ+ : 6 h")
+    elif page == "logs":
+        cid = await get_int(gid, "log_channel")
+        lines.append(f"📍 Salon : {f'<#{cid}>' if cid else '**aucun** (logs coupés)'}")
+        lines.append("")
+        for cat, (label, default) in LOG_CATS.items():
+            lines.append(f"{mark(await log_cat_enabled(gid, cat))} {label}")
+    elif page == "economie":
+        lines.append("")
+        for key, label in ECO_LABELS.items():
+            lines.append(f"• {label} : **{await eco_cfg(gid, key)}** {COIN}")
+        wc = await get_int(gid, "welcome_channel")
+        mode = await get_setting(gid, "welcome_mode", "texte")
+        lines.append(f"👋 Salon d'accueil : {f'<#{wc}>' if wc else '—'} • mode **{mode}** (détails : `/bienvenue config`)")
+    elif page == "outils":
+        lines += [
+            "🤫 **Silence** : je me tais un moment", "✉️ **Envoyer** : message anonyme ou sous un pseudo",
+            "🔨 **Punition** : panel de modération d'un membre", "🎭 **Panneau de rôles** : rôles à boutons",
+            "🛠️ **Commandes perso** : créer, supprimer, lister", "🧪 **Test** et ⚡ **Optimiser**",
+        ]
+    e.description = (e.description or "") + "\n\n" + "\n".join(lines)
+    e.set_footer(text=f"Panel privé • expire dans 10 min • {BOT_NAME} 🖤")
+    return e
+
+
+class CfgPageSelect(discord.ui.Select):
+    def __init__(self, current: str):
+        super().__init__(
+            placeholder="📂 Choisir une section…", row=0,
+            options=[discord.SelectOption(label=lab, value=key, description=desc[:100], default=(key == current))
+                     for key, lab, desc in CFG_PAGES],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.page = self.values[0]
+        await self.view.render(interaction)
+
+
+class CfgToggle(discord.ui.Button):
+    def __init__(self, key: str, label: str, state: bool, row: int):
+        super().__init__(
+            label=f"{label} : {'on' if state else 'off'}"[:80], row=row,
+            style=discord.ButtonStyle.success if state else discord.ButtonStyle.secondary,
+        )
+        self.key, self.base, self.state = key, label, state
+
+    async def callback(self, interaction: discord.Interaction):
+        self.state = not self.state
+        await set_flag(interaction.guild_id, self.key, self.state)
+        spawn(log_cmd(interaction, "config › réglage", f"`{self.base}` : {'on' if self.state else 'off'}"))
+        await self.view.render(interaction)
+
+
+class CfgAction(discord.ui.Button):
+    def __init__(self, label: str, emoji: str, style: discord.ButtonStyle, row: int, handler):
+        super().__init__(label=label, emoji=emoji, style=style, row=row)
+        self.handler = handler
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.handler(interaction)
+
+
+class CfgStyleSelect(discord.ui.Select):
+    def __init__(self, current: str, row: int):
+        super().__init__(
+            placeholder="🎭 Changer ma personnalité…", row=row,
+            options=[discord.SelectOption(label=label, value=key, default=(key == current))
+                     for key, (label, _) in STYLES.items()],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        key = self.values[0]
+        await set_setting(interaction.guild_id, "style", key)
+        spawn(log_cmd(interaction, "config › style", f"`style` : {STYLES[key][0]}"))
+        await self.view.render(interaction)
+
+
+class CfgLogChannel(discord.ui.ChannelSelect):
+    def __init__(self, row: int):
+        super().__init__(
+            placeholder="📍 Choisir le salon de logs…", channel_types=[discord.ChannelType.text],
+            min_values=1, max_values=1, row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(self.values[0].id)
+        p = channel.permissions_for(interaction.guild.me) if channel else None
+        if channel is None or not (p.send_messages and p.embed_links):
+            return await interaction.response.send_message(
+                "🚫 Il me manque « Envoyer des messages » et « Intégrer des liens » dans ce salon.", ephemeral=True
+            )
+        await set_setting(interaction.guild_id, "log_channel", str(channel.id))
+        spawn(log_cmd(interaction, "config › logs", f"`salon` : {channel.mention}"))
+        await self.view.render(interaction)
+
+
+class CfgLogCats(discord.ui.Select):
+    def __init__(self, enabled: set, row: int):
+        super().__init__(
+            placeholder="🗂️ Types de logs à enregistrer…", min_values=0, max_values=len(LOG_CATS), row=row,
+            options=[discord.SelectOption(label=label[:100], value=cat, default=(cat in enabled))
+                     for cat, (label, _) in LOG_CATS.items()],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        for cat in LOG_CATS:
+            await set_flag(interaction.guild_id, f"logc_{cat}", cat in self.values)
+        spawn(log_cmd(interaction, "config › types de logs", ", ".join(self.values) or "aucun"))
+        await self.view.render(interaction)
+
+
+async def _h_silence(i: discord.Interaction):
+    await i.response.send_modal(SilenceModal())
+
+
+async def _h_send(i: discord.Interaction):
+    await i.response.send_modal(SendModal())
+
+
+async def _h_punish(i: discord.Interaction):
+    await i.response.send_message("Qui veux-tu punir ?", view=PickMemberView(i.user.id), ephemeral=True)
+
+
+async def _h_roles(i: discord.Interaction):
+    await i.response.send_message(
+        "Quels rôles proposer ? Le panneau sera posté **dans ce salon**.",
+        view=PickRolesView(i.user.id), ephemeral=True,
+    )
+
+
+async def _h_ccadd(i: discord.Interaction):
+    await i.response.send_modal(CCAddModal())
+
+
+async def _h_ccdel(i: discord.Interaction):
+    await i.response.send_modal(CCDelModal())
+
+
+async def _h_cclist(i: discord.Interaction):
+    await cc_list.callback(i)
+    spawn(log_cmd(i, "config › commande liste"))
+
+
+async def _h_test(i: discord.Interaction):
+    await test.callback(i)
+    spawn(log_cmd(i, "config › test"))
+
+
+async def _h_optim(i: discord.Interaction):
+    await optimiser.callback(i, False)
+
+
+async def _h_ecopanel(i: discord.Interaction):
+    await ecopanel.callback(i)
+
+
+async def _h_welcome(i: discord.Interaction):
+    await i.response.send_message(embed=await welcome_state_embed(i.guild), ephemeral=True)
+
+
+class ConfigPanel(_OwnerView):
+    def __init__(self, invoker_id: int, guild: discord.Guild, page: str = "general"):
+        super().__init__(invoker_id)
+        self.timeout = 600
+        self.guild, self.page = guild, page
+        self.origin: Optional[discord.Interaction] = None
+
+    async def build(self):
+        self.clear_items()
+        gid, page = self.guild.id, self.page
+        self.add_item(CfgPageSelect(page))
+        for i, (key, label, default) in enumerate(CFG_TOGGLES.get(page, [])):
+            self.add_item(CfgToggle(key, label, await get_flag(gid, key, default), 1 + i // 5))
+        P, S, G, D = discord.ButtonStyle.primary, discord.ButtonStyle.secondary, discord.ButtonStyle.success, discord.ButtonStyle.danger
+        if page == "general":
+            self.add_item(CfgStyleSelect(await get_style(gid), 2))
+        elif page == "logs":
+            self.add_item(CfgLogChannel(1))
+            enabled = {c for c in LOG_CATS if await log_cat_enabled(gid, c)}
+            self.add_item(CfgLogCats(enabled, 2))
+            self.add_item(CfgAction("Couper les logs", "📜", S, 3, self._logs_off))
+        elif page == "economie":
+            self.add_item(CfgAction("Panel économie", "💰", P, 2, _h_ecopanel))
+            self.add_item(CfgAction("Détails de l'accueil", "👋", S, 2, _h_welcome))
+        elif page == "outils":
+            for label, emoji, style, row, h in (
+                ("Silence", "🤫", P, 1, _h_silence), ("Envoyer", "✉️", P, 1, _h_send),
+                ("Punition", "🔨", D, 1, _h_punish), ("Panneau de rôles", "🎭", P, 1, _h_roles),
+                ("Créer cmd", "🛠️", G, 2, _h_ccadd), ("Suppr. cmd", "🗑️", D, 2, _h_ccdel),
+                ("Liste cmds", "📋", S, 2, _h_cclist), ("Test", "🧪", S, 2, _h_test),
+                ("Optimiser", "⚡", S, 3, _h_optim),
+            ):
+                self.add_item(CfgAction(label, emoji, style, row, h))
+        self.add_item(CfgAction("Fermer", "✖️", S, 4, self._close))
+
+    async def _logs_off(self, interaction: discord.Interaction):
+        await log_cmd(interaction, "config › logs", "Logs désactivés")  # tracé AVANT la coupure
+        await set_setting(interaction.guild_id, "log_channel", "0")
+        await self.render(interaction)
+
+    async def _close(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(embed=emb("⚙️ Panel fermé", "À la prochaine 🖤", COLOR_DARK), view=None)
+
+    async def render(self, interaction: discord.Interaction):
+        await self.build()
+        await interaction.response.edit_message(embed=await cfg_embed(self.guild, self.page), view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.origin:
+            try:
+                await self.origin.edit_original_response(view=self)
+            except discord.HTTPException:
+                pass
+
+
+async def open_config_panel(interaction: discord.Interaction, page: str = "general"):
+    view = ConfigPanel(interaction.user.id, interaction.guild, page)
+    await view.build()
+    await interaction.response.send_message(embed=await cfg_embed(interaction.guild, page), view=view, ephemeral=True)
+    view.origin = interaction
+
+
+@bot.tree.command(name="adminpanel", description="(admin) Panneau de configuration complet du bot ⚙️")
+@app_commands.describe(
+    page="Section à ouvrir directement",
+    reactions="Réactions emoji sur les messages", spontane="Rebondir de moi-même sur certains messages",
+    salutations="Répondre aux « coucou / ça va ? » même sans mention", nom="Répondre quand on écrit mon prénom",
+)
+@app_commands.choices(page=[app_commands.Choice(name=lab, value=key) for key, lab, _ in CFG_PAGES])
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+async def adminpanel(
+    interaction: discord.Interaction, page: Optional[app_commands.Choice[str]] = None,
+    reactions: Optional[bool] = None, spontane: Optional[bool] = None,
+    salutations: Optional[bool] = None, nom: Optional[bool] = None,
+):
+    for key, val in (("reactions", reactions), ("spontane", spontane), ("salutations", salutations), ("nom", nom)):
+        if val is not None:
+            await set_flag(interaction.guild_id, key, val)
+    await open_config_panel(interaction, page.value if page else "general")
+
+
+# ---------------------------------------------------------------------
+# 🎯 /kahoot : quiz live multi-joueurs (créé à la main ou généré par l'IA)
+# ---------------------------------------------------------------------
+KAHOOT_MAX_Q = 20
+KAHOOT_MAX_PER_USER = 10
+KAHOOT_MAX_PER_GUILD = 100
+KAHOOT_SHAPES = ["🔺", "🔷", "🟡", "🟩"]
+KAHOOT_STYLES = [discord.ButtonStyle.danger, discord.ButtonStyle.primary,
+                 discord.ButtonStyle.secondary, discord.ButtonStyle.success]
+kahoot_live: dict = {}  # salon -> lobby ou partie en cours (une seule par salon)
+_kahoot_gen_cd: dict[int, float] = {}
+
+
+def kahoot_clean_question(raw: dict) -> Optional[dict]:
+    """Valide / nettoie une question (créée à la main ou renvoyée par l'IA)."""
+    try:
+        q = _clean_name(raw.get("question"), 200)
+        good = _clean_name(raw.get("bonne_reponse") or raw.get("bonne"), 80)
+        wrongs: list[str] = []
+        for w in raw.get("mauvaises") or []:
+            w = _clean_name(w, 80)
+            if w and w.casefold() != good.casefold() and w.casefold() not in {x.casefold() for x in wrongs}:
+                wrongs.append(w)
+        time_s = min(max(int(raw.get("temps", 20)), 5), 60)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    wrongs = wrongs[:3]
+    if not q or not good or not wrongs:
+        return None
+    return {"question": q, "bonne": good, "mauvaises": wrongs, "temps": time_s}
+
+
+async def kahoot_get(gid: int, kid: int) -> Optional[dict]:
+    rows = await db_all("SELECT id, author_id, title, questions FROM kahoots WHERE guild_id=? AND id=?", (gid, kid))
+    if not rows:
+        return None
+    r = rows[0]
+    return {"id": r[0], "author_id": r[1], "title": r[2], "questions": json.loads(r[3])}
+
+
+async def kahoot_save(gid: int, author_id: int, title: str, questions: list[dict]) -> int:
+    cur = await bot.db.execute(
+        "INSERT INTO kahoots(guild_id, author_id, title, questions, created_at) VALUES (?,?,?,?,?)",
+        (gid, author_id, title, json.dumps(questions, ensure_ascii=False), int(time.time())),
+    )
+    await bot.db.commit()
+    return cur.lastrowid
+
+
+async def kahoot_limit_error(interaction: discord.Interaction) -> Optional[str]:
+    gid, uid = interaction.guild_id, interaction.user.id
+    total = (await db_all("SELECT COUNT(*) FROM kahoots WHERE guild_id=?", (gid,)))[0][0]
+    mine = (await db_all("SELECT COUNT(*) FROM kahoots WHERE guild_id=? AND author_id=?", (gid, uid)))[0][0]
+    if total >= KAHOOT_MAX_PER_GUILD:
+        return f"🎯 Le serveur a atteint la limite de {KAHOOT_MAX_PER_GUILD} Kahoot."
+    if mine >= KAHOOT_MAX_PER_USER and not interaction.permissions.manage_guild:
+        return f"🎯 Tu as déjà {KAHOOT_MAX_PER_USER} Kahoot : supprime-en un avec `/kahoot supprimer`."
+    return None
+
+
+async def kahoot_ai_generate(theme: str, n: int, diff: str) -> tuple[str, list[dict]]:
+    prompt = (
+        f"Crée un quiz de type Kahoot de {n} questions sur le thème : {theme}. Difficulté : {diff}. "
+        "Chaque question a UNE seule bonne réponse et 3 mauvaises réponses plausibles ; réponses courtes "
+        "(60 caractères max) ; questions variées et fiables ; 'temps' = secondes pour répondre (10 à 30). "
+        'JSON : {"titre": "", "questions": [{"question": "", "bonne_reponse": "", '
+        '"mauvaises": ["", "", ""], "temps": 20}]}'
+    )
+    data = await ask_json(prompt, system=QUIZ_SYSTEM, max_tokens=min(6000, 450 * n + 600))
+    title = _clean_name(data.get("titre"), 80) or f"Kahoot {theme[:60]}"
+    qs = [q for q in (kahoot_clean_question(r) for r in (data.get("questions") or []) if isinstance(r, dict)) if q]
+    if not qs:
+        raise ValueError("aucune question valide")
+    return title, qs[:n]
+
+
+# ---------- Partie en direct ----------
+class KahootGame:
+    def __init__(self, kahoot: dict, host_id: int, channel, players: dict):
+        self.k, self.host_id, self.channel = kahoot, host_id, channel
+        self.players: dict[int, str] = dict(players)
+        self.scores: dict[int, int] = defaultdict(int)
+        self.streak: dict[int, int] = defaultdict(int)
+        self.answers: dict[int, tuple[int, float]] = {}
+        self.shuffled: list[str] = []
+        self.correct = 0
+        self.q_start = 0.0
+        self.open = False
+        self.cancelled = False
+        self.idle = 0
+        self.note = ""
+        self.done_event = asyncio.Event()
+        self.message: Optional[discord.Message] = None
+
+    def ranking(self) -> list[int]:
+        return sorted(self.players, key=lambda u: (-self.scores.get(u, 0), u))
+
+    def board(self, limit: int) -> str:
+        medals = ["🥇", "🥈", "🥉"]
+        return "\n".join(
+            f"{medals[i] if i < 3 else f'`#{i + 1}`'} <@{u}> — **{self.scores.get(u, 0)}**"
+            for i, u in enumerate(self.ranking()[:limit])
+        )
+
+    async def answer(self, interaction: discord.Interaction, idx: int):
+        uid = interaction.user.id
+        if not self.open:
+            return await interaction.response.send_message("⌛ Trop tard pour cette question.", ephemeral=True)
+        if uid in self.answers:
+            return await interaction.response.send_message("T'as déjà répondu, patience 😌", ephemeral=True)
+        self.answers[uid] = (idx, time.monotonic() - self.q_start)
+        self.players.setdefault(uid, interaction.user.display_name)
+        await interaction.response.send_message(
+            f"✅ Réponse enregistrée : {KAHOOT_SHAPES[idx]} **{self.shuffled[idx]}**", ephemeral=True
+        )
+        if all(p in self.answers for p in self.players):
+            self.done_event.set()
+
+    async def run(self):
+        kahoot_live[self.channel.id] = self
+        try:
+            qs = self.k["questions"]
+            for n, q in enumerate(qs, 1):
+                await self.play_question(n, len(qs), q)
+                if self.idle >= 2:
+                    self.cancelled, self.note = True, "Personne ne répond depuis deux questions : j'arrête 😏"
+                if self.cancelled:
+                    break
+                await asyncio.sleep(5 if n < len(qs) else 1)
+            await self.finish()
+        except Exception:  # noqa: BLE001
+            log.exception("kahoot")
+            try:
+                await self.channel.send("😅 Le Kahoot a planté, désolé.")
+            except discord.HTTPException:
+                pass
+        finally:
+            if kahoot_live.get(self.channel.id) is self:
+                kahoot_live.pop(self.channel.id, None)
+
+    async def play_question(self, n: int, total: int, q: dict):
+        answers = [q["bonne"], *q["mauvaises"]]
+        random.shuffle(answers)
+        self.shuffled, self.correct = answers, answers.index(q["bonne"])
+        self.answers, self.done_event = {}, asyncio.Event()
+        t = q["temps"]
+        deadline = int(time.time()) + t
+        desc = f"**Question {n}/{total}**\n\n{q['question']}\n\n" + "\n".join(
+            f"{KAHOOT_SHAPES[i]} {a}" for i, a in enumerate(answers)
+        ) + f"\n\n⏳ Fin <t:{deadline}:R> • plus tu réponds vite, plus tu gagnes de points !"
+        embed = emb(f"🎯 {self.k['title']}", desc, COLOR_PURPLE)
+        embed.set_footer(text=f"{len(self.players)} joueur(s) • ⏹️ pour arrêter (hôte / staff) • {BOT_NAME} 🖤")
+        view = KahootQView(self, answers)
+        if self.message is None:
+            self.message = await self.channel.send(embed=embed, view=view)
+        else:
+            await self.message.edit(embed=embed, view=view)
+        self.q_start = time.monotonic()
+        self.open = True
+        try:
+            await asyncio.wait_for(self.done_event.wait(), timeout=t)
+        except asyncio.TimeoutError:
+            pass
+        self.open = False
+        view.stop()
+
+        gains: dict[int, int] = {}
+        for uid, (idx, elapsed) in list(self.answers.items()):
+            if idx == self.correct:
+                self.streak[uid] += 1
+                gains[uid] = 500 + int(500 * max(0.0, 1 - elapsed / t)) + 50 * min(self.streak[uid] - 1, 4)
+                self.scores[uid] += gains[uid]
+            else:
+                self.streak[uid] = 0
+        for uid in self.players:
+            if uid not in self.answers:
+                self.streak[uid] = 0
+        self.idle = 0 if self.answers else self.idle + 1
+
+        counts = Counter(idx for idx, _ in self.answers.values())
+        lines = [f"{KAHOOT_SHAPES[i]} {a}{' ✅' if i == self.correct else ''} — **{counts.get(i, 0)}**"
+                 for i, a in enumerate(answers)]
+        e = emb(f"✅ Réponse : {q['bonne']}", f"**{q['question']}**\n\n" + "\n".join(lines), COLOR_PINK)
+        board = self.board(5)
+        if board:
+            for u, g in gains.items():
+                board = board.replace(f"<@{u}> — **{self.scores[u]}**", f"<@{u}> — **{self.scores[u]}** (+{g})")
+        e.add_field(name="🏆 Classement", value=board or "Personne n'a marqué de points 😏", inline=False)
+        await self.message.edit(embed=e, view=None)
+
+    async def finish(self):
+        ranking = self.ranking()
+        title = "⏹️ Kahoot arrêté" if self.cancelled else "🎉 Kahoot terminé"
+        desc = f"**{self.k['title']}**\n\n" + (self.board(10) or "Personne n'a joué 😅")
+        if self.note:
+            desc += f"\n\n{self.note}"
+        e = emb(title, desc, COLOR_PINK)
+        try:
+            if self.message:
+                await self.message.edit(embed=e, view=None)
+            else:
+                await self.channel.send(embed=e)
+        except discord.HTTPException:
+            pass
+        gid = getattr(getattr(self.channel, "guild", None), "id", None)
+        if gid and len(ranking) >= 2 and not self.cancelled:  # pas de points en solo
+            top = self.scores.get(ranking[0], 0)
+            leaders = [u for u in ranking if self.scores.get(u, 0) == top and top > 0]
+            outcomes = {u: ("loss" if u not in leaders else ("win" if len(leaders) == 1 else "draw")) for u in ranking}
+            await record_many(gid, "kahoot", outcomes)
+
+
+class KahootAnswerBtn(discord.ui.Button):
+    def __init__(self, idx: int, text: str):
+        super().__init__(label=text[:80], emoji=KAHOOT_SHAPES[idx], style=KAHOOT_STYLES[idx], row=idx // 2)
+        self.idx = idx
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.game.answer(interaction, self.idx)
+
+
+class KahootStopBtn(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Arrêter", emoji="⏹️", style=discord.ButtonStyle.secondary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        g = self.view.game
+        if interaction.user.id != g.host_id and not interaction.permissions.manage_messages:
+            return await interaction.response.send_message("Seul l'hôte ou le staff peut arrêter 😏", ephemeral=True)
+        g.cancelled = True
+        g.done_event.set()
+        await interaction.response.send_message("⏹️ J'arrête la partie.", ephemeral=True)
+
+
+class KahootQView(discord.ui.View):
+    def __init__(self, game: KahootGame, answers: list[str]):
+        super().__init__(timeout=None)
+        self.game = game
+        for i, a in enumerate(answers):
+            self.add_item(KahootAnswerBtn(i, a))
+        self.add_item(KahootStopBtn())
+
+
+class KahootLobby(discord.ui.View):
+    def __init__(self, kahoot: dict, host: discord.abc.User, channel_id: int):
+        super().__init__(timeout=180)
+        self.k, self.host_id, self.channel_id = kahoot, host.id, channel_id
+        self.players: dict[int, str] = {host.id: host.display_name}
+        self.started = False
+        self.message: Optional[discord.Message] = None
+
+    def embed(self) -> discord.Embed:
+        qs = self.k["questions"]
+        lines = "\n".join(f"{'👑' if u == self.host_id else '🎮'} <@{u}>" for u in self.players)
+        total_t = sum(q["temps"] for q in qs)
+        e = emb(
+            f"🎯 Kahoot — {self.k['title']}",
+            f"**{len(qs)}** question(s) • ~{max(1, total_t // 60)} min • par <@{self.k['author_id']}>\n"
+            f"Clique sur **Rejoindre** (ou réponds directement une fois lancé) : plus tu réponds vite, plus tu marques !\n\n"
+            f"**Joueurs ({len(self.players)})**\n{lines}",
+            COLOR_PURPLE,
+        )
+        e.set_footer(text=f"L'hôte lance la partie • 3 minutes • {BOT_NAME} 🖤")
+        return e
+
+    def _free(self):
+        if kahoot_live.get(self.channel_id) is self:
+            kahoot_live.pop(self.channel_id, None)
+
+    @discord.ui.button(label="Rejoindre", emoji="🎮", style=discord.ButtonStyle.success)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in self.players:
+            return await interaction.response.send_message("T'es déjà dans la partie 😌", ephemeral=True)
+        self.players[interaction.user.id] = interaction.user.display_name
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="Quitter", emoji="🚪", style=discord.ButtonStyle.secondary)
+    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        if uid not in self.players:
+            return await interaction.response.send_message("Tu n'es pas dans la partie 😏", ephemeral=True)
+        if uid == self.host_id:
+            self.started = True
+            self.stop()
+            self._free()
+            return await interaction.response.edit_message(
+                embed=emb("🎯 Partie annulée", "L'hôte est parti.", COLOR_DARK), view=None
+            )
+        del self.players[uid]
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="Lancer", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host_id and not interaction.permissions.manage_messages:
+            return await interaction.response.send_message("Seul l'hôte peut lancer la partie 😏", ephemeral=True)
+        self.started = True
+        self.stop()
+        game = KahootGame(self.k, self.host_id, interaction.channel, self.players)
+        kahoot_live[self.channel_id] = game
+        await interaction.response.edit_message(
+            embed=emb("🎯 C'est parti !", f"**{self.k['title']}** démarre : regardez le message ci-dessous 👇", COLOR_PINK),
+            view=None,
+        )
+        spawn(game.run())
+
+    async def on_timeout(self):
+        if self.started:
+            return
+        self._free()
+        if self.message:
+            try:
+                await self.message.edit(embed=emb("⌛ Lobby expiré", "Personne n'a lancé la partie.", COLOR_DARK), view=None)
+            except discord.HTTPException:
+                pass
+
+
+async def kahoot_open_lobby(interaction: discord.Interaction, k: dict):
+    ch = interaction.channel
+    if ch.id in kahoot_live:
+        return await interaction.response.send_message("🎯 Une partie ou un lobby est déjà en cours dans ce salon.", ephemeral=True)
+    p = ch.permissions_for(interaction.guild.me)
+    if not (p.send_messages and p.embed_links):
+        return await interaction.response.send_message("🚫 Il me manque « Envoyer des messages » / « Intégrer des liens » ici.", ephemeral=True)
+    lobby = KahootLobby(k, interaction.user, ch.id)
+    kahoot_live[ch.id] = lobby
+    try:
+        await interaction.response.send_message(embed=lobby.embed(), view=lobby)
+        lobby.message = await interaction.original_response()
+    except discord.HTTPException:
+        lobby._free()
+        raise
+
+
+# ---------- Création à la main ----------
+class KahootReadyView(_OwnerView):
+    def __init__(self, invoker_id: int, kahoot: dict):
+        super().__init__(invoker_id)
+        self.k = kahoot
+
+    @discord.ui.button(label="Lancer ici", emoji="▶️", style=discord.ButtonStyle.success)
+    async def b_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await kahoot_open_lobby(interaction, self.k)
+
+
+class KahootQuestionModal(SafeModal, title="➕ Nouvelle question"):
+    question = discord.ui.TextInput(label="Question", style=discord.TextStyle.paragraph, max_length=200)
+    bonne = discord.ui.TextInput(label="Bonne réponse", max_length=80)
+    mauvaises = discord.ui.TextInput(
+        label="Mauvaises réponses (1 à 3, une par ligne)", style=discord.TextStyle.paragraph, max_length=260,
+        placeholder="Une mauvaise réponse par ligne",
+    )
+    temps = discord.ui.TextInput(label="Temps en secondes (5 à 60)", default="20", required=False, max_length=2)
+
+    def __init__(self, builder: "KahootBuilder"):
+        super().__init__()
+        self.builder = builder
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_t = self.temps.value.strip() or "20"
+        if not raw_t.isdigit() or not 5 <= int(raw_t) <= 60:
+            return await interaction.response.send_message("⏱️ Le temps doit être entre 5 et 60 secondes.", ephemeral=True)
+        q = kahoot_clean_question({
+            "question": self.question.value, "bonne_reponse": self.bonne.value,
+            "mauvaises": re.split(r"[\n|;]", self.mauvaises.value), "temps": int(raw_t),
+        })
+        if q is None:
+            return await interaction.response.send_message(
+                "🎯 Question invalide : il faut une question, une bonne réponse et **1 à 3** mauvaises réponses différentes.",
+                ephemeral=True,
+            )
+        self.builder.questions.append(q)
+        await interaction.response.edit_message(embed=self.builder.embed(), view=self.builder)
+
+
+class KahootBuilder(_OwnerView):
+    def __init__(self, invoker_id: int, name: str):
+        super().__init__(invoker_id)
+        self.timeout = 900
+        self.kname = name
+        self.questions: list[dict] = []
+        self.origin: Optional[discord.Interaction] = None
+
+    def embed(self) -> discord.Embed:
+        lines = [f"`{i}.` {q['question'][:70]} — ✅ {q['bonne'][:30]} ({q['temps']}s)" for i, q in enumerate(self.questions, 1)]
+        body = "\n".join(lines) or "Aucune question pour l'instant : clique sur **Ajouter une question**."
+        return emb(f"🎯 Nouveau Kahoot — {self.kname}", f"{body}\n\n{len(self.questions)}/{KAHOOT_MAX_Q} question(s)", COLOR_PURPLE)
+
+    @discord.ui.button(label="Ajouter une question", emoji="➕", style=discord.ButtonStyle.primary)
+    async def b_add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.questions) >= KAHOOT_MAX_Q:
+            return await interaction.response.send_message(f"🎯 {KAHOOT_MAX_Q} questions maximum.", ephemeral=True)
+        await interaction.response.send_modal(KahootQuestionModal(self))
+
+    @discord.ui.button(label="Retirer la dernière", emoji="↩️", style=discord.ButtonStyle.secondary)
+    async def b_undo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.questions:
+            self.questions.pop()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="Enregistrer", emoji="💾", style=discord.ButtonStyle.success)
+    async def b_save(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.questions:
+            return await interaction.response.send_message("🎯 Ajoute au moins une question d'abord.", ephemeral=True)
+        err = await kahoot_limit_error(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        kid = await kahoot_save(interaction.guild_id, interaction.user.id, self.kname, self.questions)
+        k = {"id": kid, "author_id": interaction.user.id, "title": self.kname, "questions": self.questions}
+        self.stop()
+        await interaction.response.edit_message(
+            embed=emb(f"✅ Kahoot #{kid} enregistré", f"**{self.kname}** — {len(self.questions)} question(s).\n"
+                      f"Relance-le quand tu veux avec `/kahoot lancer numero:{kid}`.", COLOR_PINK),
+            view=KahootReadyView(interaction.user.id, k),
+        )
+
+    @discord.ui.button(label="Annuler", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def b_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(embed=emb("✖️ Annulé", "Rien n'a été enregistré.", COLOR_DARK), view=None)
+
+
+# ---------- Génération par l'IA ----------
+async def kahoot_generate_flow(interaction: discord.Interaction, theme: str, n: int, diff: str):
+    """À appeler APRÈS un defer(ephemeral=True)."""
+    err = await kahoot_limit_error(interaction)
+    if err:
+        return await interaction.followup.send(err, ephemeral=True)
+    try:
+        title, questions = await kahoot_ai_generate(theme, n, diff)
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e), ephemeral=True)
+    kid = await kahoot_save(interaction.guild_id, interaction.user.id, title, questions)
+    k = {"id": kid, "author_id": interaction.user.id, "title": title, "questions": questions}
+    preview = "\n".join(f"`{i}.` {q['question'][:80]}" for i, q in enumerate(questions[:15], 1))
+    e = emb(f"🤖 Kahoot #{kid} généré — {title}", f"{preview}\n\n{len(questions)} question(s) • thème : {theme[:60]} • niveau {diff}", COLOR_PINK)
+    await interaction.followup.send(embed=e, view=KahootReadyView(interaction.user.id, k), ephemeral=True)
+
+
+def _diff(raw: str) -> str:
+    raw = plain(raw)
+    return raw if raw in ("facile", "moyen", "difficile") else "moyen"
+
+
+class KahootGenModal(SafeModal, title="🤖 Kahoot généré par l'IA"):
+    theme = discord.ui.TextInput(label="Thème", max_length=100, placeholder="Ex : Harry Potter, histoire de France…")
+    nombre = discord.ui.TextInput(label="Nombre de questions (3 à 15)", default="8", max_length=2)
+    difficulte = discord.ui.TextInput(label="Difficulté (facile / moyen / difficile)", default="moyen", max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.nombre.value.strip()
+        if not raw.isdigit() or not 3 <= int(raw) <= 15:
+            return await interaction.response.send_message("🔢 Le nombre de questions doit être entre 3 et 15.", ephemeral=True)
+        wait = 30 - (time.time() - _kahoot_gen_cd.get(interaction.user.id, 0))
+        if wait > 0:
+            return await interaction.response.send_message(f"⏳ Réessaie dans {wait:.0f}s.", ephemeral=True)
+        _kahoot_gen_cd[interaction.user.id] = time.time()
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await kahoot_generate_flow(interaction, self.theme.value.strip(), int(raw), _diff(self.difficulte.value))
+
+
+class KahootTitleModal(SafeModal, title="🎯 Créer un Kahoot"):
+    titre = discord.ui.TextInput(label="Titre du Kahoot", max_length=80)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        err = await kahoot_limit_error(interaction)
+        if err:
+            return await interaction.response.send_message(err, ephemeral=True)
+        builder = KahootBuilder(interaction.user.id, self.titre.value.strip())
+        await interaction.response.send_message(embed=builder.embed(), view=builder, ephemeral=True)
+        builder.origin = interaction
+
+
+class KahootHubSelect(discord.ui.Select):
+    def __init__(self, rows: list):
+        super().__init__(
+            placeholder="▶️ Lancer un Kahoot du serveur…", row=0,
+            options=[discord.SelectOption(label=f"#{i} · {t}"[:100], value=str(i),
+                                          description=f"{len(json.loads(q))} question(s)") for i, t, q in rows],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        k = await kahoot_get(interaction.guild_id, int(self.values[0]))
+        if k is None:
+            return await interaction.response.send_message("❌ Ce Kahoot n'existe plus.", ephemeral=True)
+        await kahoot_open_lobby(interaction, k)
+
+
+class KahootHub(_OwnerView):
+    """Menu Kahoot (ouvert depuis /jeux) : lancer, générer avec l'IA ou créer le sien."""
+
+    def __init__(self, invoker_id: int, rows: list):
+        super().__init__(invoker_id)
+        if rows:
+            self.add_item(KahootHubSelect(rows))
+
+    @discord.ui.button(label="Générer avec l'IA", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
+    async def b_ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(KahootGenModal())
+
+    @discord.ui.button(label="Créer le mien", emoji="✍️", style=discord.ButtonStyle.success, row=1)
+    async def b_new(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(KahootTitleModal())
+
+
+async def kahoot_autocomplete(interaction: discord.Interaction, current: str):
+    if not interaction.guild_id:
+        return []
+    like = current.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = await db_all(
+        "SELECT id, title, questions FROM kahoots WHERE guild_id=? AND (title LIKE ? ESCAPE '\\' "
+        "OR CAST(id AS TEXT) LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT 25",
+        (interaction.guild_id, f"%{like}%", f"{like}%"),
+    )
+    return [app_commands.Choice(name=f"#{i} · {t} ({len(json.loads(q))} q)"[:100], value=i) for i, t, q in rows]
+
+
+kahoot_group = app_commands.Group(name="kahoot", description="Quiz live multi-joueurs façon Kahoot 🎯", guild_only=True)
+
+
+@kahoot_group.command(name="creer", description="Crée ton Kahoot question par question ✍️")
+@app_commands.describe(titre="Le titre du Kahoot")
+async def kahoot_creer(interaction: discord.Interaction, titre: app_commands.Range[str, 3, 80]):
+    err = await kahoot_limit_error(interaction)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    builder = KahootBuilder(interaction.user.id, titre.strip())
+    await interaction.response.send_message(embed=builder.embed(), view=builder, ephemeral=True)
+    builder.origin = interaction
+
+
+@kahoot_group.command(name="generer", description="L'IA crée un Kahoot pour toi 🤖")
+@app_commands.describe(theme="Le thème du quiz", nombre="Nombre de questions (3 à 15)", difficulte="Niveau de difficulté")
+@app_commands.choices(difficulte=[app_commands.Choice(name=n, value=n.lower()) for n in ("Facile", "Moyen", "Difficile")])
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.user.id)
+async def kahoot_generer(
+    interaction: discord.Interaction, theme: app_commands.Range[str, 2, 100],
+    nombre: app_commands.Range[int, 3, 15] = 8, difficulte: Optional[app_commands.Choice[str]] = None,
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await kahoot_generate_flow(interaction, theme.strip(), nombre, difficulte.value if difficulte else "moyen")
+
+
+@kahoot_group.command(name="lancer", description="Lance un Kahoot dans ce salon ▶️")
+@app_commands.describe(numero="Le Kahoot à jouer (choisis dans la liste)")
+@app_commands.autocomplete(numero=kahoot_autocomplete)
+async def kahoot_lancer(interaction: discord.Interaction, numero: int):
+    k = await kahoot_get(interaction.guild_id, numero)
+    if k is None:
+        return await interaction.response.send_message("❌ Ce Kahoot n'existe pas.", ephemeral=True)
+    await kahoot_open_lobby(interaction, k)
+
+
+@kahoot_group.command(name="liste", description="Liste les Kahoot du serveur 📋")
+@app_commands.describe(mes_kahoots="Ne voir que les miens")
+async def kahoot_liste(interaction: discord.Interaction, mes_kahoots: bool = False):
+    sql, params = "SELECT id, author_id, title, questions FROM kahoots WHERE guild_id=?", (interaction.guild_id,)
+    if mes_kahoots:
+        sql += " AND author_id=?"
+        params += (interaction.user.id,)
+    rows = await db_all(sql + " ORDER BY id DESC LIMIT 25", params)
+    if not rows:
+        return await interaction.response.send_message("Aucun Kahoot. Crée le premier avec `/kahoot creer` ou `/kahoot generer` 😏", ephemeral=True)
+    lines = [f"`#{i}` **{t[:50]}** — {len(json.loads(q))} question(s) · <@{a}>" for i, a, t, q in rows]
+    await interaction.response.send_message(
+        embed=emb(f"🎯 Kahoot du serveur ({len(rows)})", "\n".join(lines)[:4000], COLOR_PINK),
+        ephemeral=True, allowed_mentions=NO_PINGS,
+    )
+
+
+@kahoot_group.command(name="supprimer", description="Supprime un de tes Kahoot (ou n'importe lequel si tu es staff) 🗑️")
+@app_commands.describe(numero="Le Kahoot à supprimer")
+@app_commands.autocomplete(numero=kahoot_autocomplete)
+async def kahoot_supprimer(interaction: discord.Interaction, numero: int):
+    k = await kahoot_get(interaction.guild_id, numero)
+    if k is None:
+        return await interaction.response.send_message("❌ Ce Kahoot n'existe pas.", ephemeral=True)
+    if k["author_id"] != interaction.user.id and not interaction.permissions.manage_messages:
+        return await interaction.response.send_message("🚫 Ce n'est pas ton Kahoot.", ephemeral=True)
+    await db_run("DELETE FROM kahoots WHERE guild_id=? AND id=?", (interaction.guild_id, numero))
+    await interaction.response.send_message(f"🗑️ Kahoot **#{numero}** supprimé.", ephemeral=True)
+
+
+bot.tree.add_command(kahoot_group)
+
+
+# ---------------------------------------------------------------------
+# 🎮 /jeux : panel avec TOUS les jeux (remplace l'ancien)
+# ---------------------------------------------------------------------
+_jeux_quiz_cd: dict[int, float] = {}
+
+
+class JeuxPFCSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="✂️ Pierre-feuille-ciseaux contre moi : choisis ton coup…",
+            options=[discord.SelectOption(label=n.capitalize(), value=n, emoji=e) for n, e in PFC.items()],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if await feature_off(interaction, "f_jeux"):
+            return
+        n = self.values[0]
+        spawn(log_cmd(interaction, "jeux › pfc", f"`choix` : {n}"))
+        await pfc.callback(interaction, app_commands.Choice(name=n.capitalize(), value=n))
+
+
+class DuelPickView(_OwnerView):
+    def __init__(self, invoker_id: int, mise: int):
+        super().__init__(invoker_id)
+        self.mise = mise
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="⚔️ Qui veux-tu défier ?", min_values=1, max_values=1)
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        m = select.values[0]
+        if not isinstance(m, discord.Member):
+            return await interaction.response.send_message("Cette personne n'est pas sur le serveur.", ephemeral=True)
+        await pfcduel.callback(interaction, m, self.mise)
+
+
+class GamesPanel(discord.ui.View):
+    """Tout le monde peut cliquer : chaque clic lance la partie pour la personne qui a cliqué."""
+
+    def __init__(self, mise: int = 0):
+        super().__init__(timeout=600)
+        self.mise = mise
+        self.message: Optional[discord.Message] = None
+        self.add_item(JeuxPFCSelect())
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def _guard(self, interaction: discord.Interaction, label: str, key: str = "f_jeux") -> bool:
+        """True = on peut continuer (fonctionnalité active) ; trace l'action dans les logs."""
+        if await feature_off(interaction, key):
+            return False
+        spawn(log_cmd(interaction, f"jeux › {label}", f"`mise` : {self.mise}" if self.mise else ""))
+        return True
+
+    # ligne 0 : jeux de cartes & quiz
+    @discord.ui.button(label="Blackjack solo", emoji="🃏", style=discord.ButtonStyle.primary, row=0)
+    async def b_bj(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "blackjack solo"):
+            await blackjack.callback(interaction, app_commands.Choice(name="Solo", value="solo"), self.mise)
+
+    @discord.ui.button(label="Blackjack table", emoji="👥", style=discord.ButtonStyle.primary, row=0)
+    async def b_bjt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "blackjack table"):
+            await blackjack.callback(interaction, app_commands.Choice(name="Table", value="table"), self.mise)
+
+    @discord.ui.button(label="Poker", emoji="♠️", style=discord.ButtonStyle.primary, row=0)
+    async def b_pk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "poker"):
+            await poker.callback(interaction, self.mise)
+
+    @discord.ui.button(label="Quiz IA", emoji="🧠", style=discord.ButtonStyle.success, row=0)
+    async def b_quiz(self, interaction: discord.Interaction, button: discord.ui.Button):
+        wait = 8 - (time.time() - _jeux_quiz_cd.get(interaction.user.id, 0))
+        if wait > 0:  # même cooldown que /quiz (protège le quota IA)
+            return await interaction.response.send_message(f"⏳ Doucement, réessaie dans {wait:.0f}s.", ephemeral=True)
+        if await self._guard(interaction, "quiz"):
+            _jeux_quiz_cd[interaction.user.id] = time.time()
+            await quiz.callback(interaction, None)
+
+    @discord.ui.button(label="Quiz des membres", emoji="📝", style=discord.ButtonStyle.success, row=0)
+    async def b_qp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "quizperso"):
+            await quizperso_jouer.callback(interaction, None)
+
+    # ligne 1 : duel, Kahoot, stats
+    @discord.ui.button(label="Duel PFC", emoji="⚔️", style=discord.ButtonStyle.danger, row=1)
+    async def b_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await feature_off(interaction, "f_jeux"):
+            return
+        await interaction.response.send_message(
+            "Choisis ton adversaire :", view=DuelPickView(interaction.user.id, self.mise), ephemeral=True
+        )
+
+    @discord.ui.button(label="Kahoot", emoji="🎯", style=discord.ButtonStyle.danger, row=1)
+    async def b_kahoot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await feature_off(interaction, "f_kahoot"):
+            return
+        rows = await db_all(
+            "SELECT id, title, questions FROM kahoots WHERE guild_id=? ORDER BY id DESC LIMIT 25", (interaction.guild_id,)
+        )
+        txt = "🎯 **Kahoot** : lance une partie, génère un quiz avec l'IA ou crée le tien."
+        if not rows:
+            txt += "\nAucun Kahoot sur le serveur pour l'instant : crée le premier 😏"
+        await interaction.response.send_message(txt, view=KahootHub(interaction.user.id, rows), ephemeral=True)
+
+    @discord.ui.button(label="Classement", emoji="🏆", style=discord.ButtonStyle.secondary, row=1)
+    async def b_top(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "classement"):
+            await classement.callback(interaction, None)
+
+    @discord.ui.button(label="Mes stats", emoji="📊", style=discord.ButtonStyle.secondary, row=1)
+    async def b_stat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "statu"):
+            await statu.callback(interaction, None)
+
+    @discord.ui.button(label="Solde", emoji="🪙", style=discord.ButtonStyle.secondary, row=1)
+    async def b_solde(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "solde"):
+            await solde.callback(interaction, None)
+
+    # ligne 3 : règles & bonus
+    @discord.ui.button(label="Règles BJ", emoji="📖", style=discord.ButtonStyle.secondary, row=3)
+    async def b_rbj(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await regleblackjack.callback(interaction)
+
+    @discord.ui.button(label="Règles poker", emoji="📖", style=discord.ButtonStyle.secondary, row=3)
+    async def b_rpk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await reglepoker.callback(interaction)
+
+    @discord.ui.button(label="Mains", emoji="🂡", style=discord.ButtonStyle.secondary, row=3)
+    async def b_main(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await main_cmd.callback(interaction)
+
+    @discord.ui.button(label="Bonus /daily", emoji="🎁", style=discord.ButtonStyle.secondary, row=3)
+    async def b_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "daily"):
+            await daily.callback(interaction)
+
+    @discord.ui.button(label="Créer un quiz", emoji="✍️", style=discord.ButtonStyle.secondary, row=3)
+    async def b_mkquiz(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._guard(interaction, "quizperso creer"):
+            await quizperso_creer.callback(interaction)
+
+
+@bot.tree.command(name="jeux", description="Ouvre le panel avec tous les jeux 🎮")
+@app_commands.describe(mise="Mise en pièces pour le blackjack et le poker (0 = sans mise)")
+@app_commands.guild_only()
+async def jeux(interaction: discord.Interaction, mise: app_commands.Range[int, 0, 1_000_000_000] = 0):
+    err = await bet_error(interaction.guild_id, interaction.user.id, mise)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    e = emb("🎮 Salle de jeux", f"Clique sur un jeu pour jouer contre {BOT_NAME} (ou entre vous) 😈", COLOR_PURPLE)
+    e.add_field(name="🃏 Blackjack", value="Solo contre moi, ou table jusqu'à 5 joueurs.", inline=True)
+    e.add_field(name="♠️ Poker", value="Texas Hold'em jusqu'à 6 joueurs, relances si mise.", inline=True)
+    e.add_field(name="✂️ Pierre-feuille-ciseaux", value="Contre moi (menu) ou en duel ⚔️.", inline=True)
+    e.add_field(name="🧠 Quiz", value="Quiz IA ou quiz créés par les membres.", inline=True)
+    e.add_field(name="🎯 Kahoot", value="Quiz live multi-joueurs : crée le tien ou laisse l'IA le faire.", inline=True)
+    e.add_field(name="🏆 Stats", value="Classement, profil, solde, règles et classement des mains.", inline=True)
+    if mise:
+        e.add_field(name="💰 Mise active", value=f"**{mise}** {COIN} sur le blackjack et le poker.", inline=False)
+    elif await eco_on(interaction.guild_id):
+        e.add_field(name="💰 Mises", value="Relance avec `/jeux mise:100` pour jouer des pièces (`/solde`, `/daily`).", inline=False)
+    view = GamesPanel(mise)
+    await interaction.response.send_message(embed=e, view=view)
+    view.message = await interaction.original_response()
 
 
 # =====================================================================
@@ -4294,6 +8914,8 @@ async def pick_emoji(text: str) -> Optional[str]:
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+    if message.guild and await automod_check(message):
         return
     if message.guild and await is_silenced(message.guild.id):
         return
