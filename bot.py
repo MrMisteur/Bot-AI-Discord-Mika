@@ -1,6 +1,33 @@
 """Bot Discord IA 🖤 — version e-girl dominatrice, "entre potes"
 
-CHAT : par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir, /meteo,/ping, /info (stats du serveur), mémoire SQLite par salon, réactions et rebonds spontanés. SOCIAL : /kiss, /hug, /pat, /slap, /bonk, /gift, mariage (/marie, /mariage, /divorce), /ship, /emoji, /statu(profil : statut, stats de jeu et argent), /stat. JEUX : /jeux (panel avec tous les jeux), /pfc, /pfcduel (contre un joueur, mise possible), /quiz, /quizperso(quiz créés par les membres), /kahoot (quiz live multi-joueurs, créés à la main ou par l'IA), /blackjack et/poker (solo ou multi-joueurs, relance possible) avec /regleblackjack, /reglepoker et /main (classement desmains de poker), stats (/classement, /stat). ÉCONOMIE : /solde, /daily, /donner, /richesse, mises dans tous les jeux, /ecopanel + /eco (réservés aux admins). OUTILS : /sondage (sondages à boutons), /ticket (assistance, transcripts), /dev (sites & apps générés parl'IA), /bienvenue (messages d'accueil personnalisés ou générés par l'IA), /rolereaction, /envoyer,commandes personnalisées (/commande, /cc, !nom). MODÉRATION : /punition panel|deban, mute vocal, rôles (/role), /silence, /purge, /annonce, /creersalon,/supprimersalon, auto-modération et sanctions automatiques activables (/automod, y compris les insultes enversle bot). ADMIN : /adminpanel (panneau unique pour modifier toutes les fonctionnalités, remplace /config), /aideadmin,/creeserveur (l'IA génère rôles, salons et permissions), /optimiser (perf + conseils), /style, /logs, /test. LOGS : sélectionnables par type (sanctions, commandes, rôles, automod, tickets, actions admin, arrivées,messages, vocal). Les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles,deban) ET les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon définiavec /logs.
+CHAT : par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir, /meteo,
+/ping, /info (stats du serveur), mémoire SQLite par salon, réactions et rebonds spontanés.
+
+SOCIAL : /kiss, /hug, /pat, /slap, /bonk, /gift, mariage (/marie, /mariage, /divorce), /ship, /emoji, /statu
+(profil : statut, stats de jeu et argent), /stat.
+
+JEUX : /jeux (panel avec tous les jeux), /pfc, /pfcduel (contre un joueur, mise possible), /quiz, /quizperso
+(quiz créés par les membres), /kahoot (quiz live multi-joueurs, créés à la main ou par l'IA), /blackjack et
+/poker (solo ou multi-joueurs, relance possible) avec /regleblackjack, /reglepoker et /main (classement des
+mains de poker), stats (/classement, /stat).
+
+ÉCONOMIE : /solde, /daily, /donner, /richesse, mises dans tous les jeux, /ecopanel + /eco (réservés aux admins).
+
+OUTILS : /sondage (sondages à boutons), /ticket (assistance, transcripts), /dev (sites & apps générés par
+l'IA), /bienvenue (messages d'accueil personnalisés ou générés par l'IA), /rolereaction, /envoyer,
+commandes personnalisées (/commande, /cc, !nom).
+
+MODÉRATION : /punition panel|deban, mute vocal, rôles (/role), /silence, /purge, /annonce, /creersalon,
+/supprimersalon, auto-modération et sanctions automatiques activables (/automod, y compris les insultes envers
+le bot).
+
+ADMIN : /adminpanel (panneau unique pour modifier toutes les fonctionnalités, remplace /config), /aideadmin,
+/creeserveur (l'IA génère rôles, salons et permissions), /optimiser (perf + conseils), /style, /logs, /test.
+
+LOGS : sélectionnables par type (sanctions, commandes, rôles, automod, tickets, actions admin, arrivées,
+messages, vocal). Les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles,
+deban) ET les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
+avec /logs.
 
 Python 3.10+ requis. Voir .env.example pour la config.
 """
@@ -9060,4 +9087,4 @@ async def on_ready():
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not AI_API_KEY:
         raise SystemExit("DISCORD_TOKEN et AI_API_KEY doivent être définis (voir .env.example)")
-    bot.run(DISCORD_TOKEN, log_handler=None)
+    bot.run(DISCORD_TOKEN, log_handler=None).
