@@ -5,3 +5,8 @@ ddgs
 aiohttp
 aiosqlite
 httpx
+PyNaCl
+edge-tts
+imageio-ffmpeg
+davey
+yt-dlp
