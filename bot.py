@@ -6,10 +6,10 @@ commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift), mariage, mini-jeux 
 modération (/punition panel|deban, rôles, mute vocal, /silence, /logs), /rolereaction, /envoyer, /statu, /emoji,
 /adminpanel + /aideadmin (réservés aux admins), mémoire SQLite.
 
-NOUVEAUTÉS 2 : /regle (règles à ACCEPTER sinon expulsion), /envoyer avec l'identité du bot, /givawayyy (giveaways).
-
 NOUVEAUTÉS : /optimiser (perf + conseils), /dev (sites & apps générés par l'IA), /bienvenue (messages d'accueil
-personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge.
+personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge,
+/regle (règles à ACCEPTER sinon expulsion), /envoyer avec l'identité du bot, /givawayyy (giveaways),
+/musique.
 
 LOGS : toutes les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles, deban)
 ET toutes les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
