@@ -1,32 +1,18 @@
-"""Bot Discord IA 🖤 — version e-girl dominatrice, "entre potes"
+"""Bot Discord IA 🖤 — version e-girl dominatrice
 
-CHAT : par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir, /meteo,
-/ping, /info (stats du serveur), mémoire SQLite par salon, réactions et rebonds spontanés.
+Chat par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir,
+commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift), mariage, mini-jeux (/pfc, /quiz, /blackjack,
+/poker) avec stats (/classement, /stat), météo, /ping, commandes personnalisées (/commande, /cc, !nom),
+modération (/punition panel|deban, rôles, mute vocal, /silence, /logs), /rolereaction, /envoyer, /statu, /emoji,
+/adminpanel + /aideadmin (réservés aux admins), mémoire SQLite.
 
-SOCIAL : /kiss, /hug, /pat, /slap, /bonk, /gift, mariage (/marie, /mariage, /divorce), /ship, /emoji, /statu
-(profil : statut, stats de jeu et argent), /stat.
+NOUVEAUTÉS 2 : /regle (règles à ACCEPTER sinon expulsion), /envoyer avec l'identité du bot, /givawayyy (giveaways).
 
-JEUX : /jeux (panel avec tous les jeux), /pfc, /pfcduel (contre un joueur, mise possible), /quiz, /quizperso
-(quiz créés par les membres), /kahoot (quiz live multi-joueurs, créés à la main ou par l'IA), /blackjack et
-/poker (solo ou multi-joueurs, relance possible) avec /regleblackjack, /reglepoker et /main (classement des
-mains de poker), stats (/classement, /stat).
+NOUVEAUTÉS : /optimiser (perf + conseils), /dev (sites & apps générés par l'IA), /bienvenue (messages d'accueil
+personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge.
 
-ÉCONOMIE : /solde, /daily, /donner, /richesse, mises dans tous les jeux, /ecopanel + /eco (réservés aux admins).
-
-OUTILS : /sondage (sondages à boutons), /ticket (assistance, transcripts), /dev (sites & apps générés par
-l'IA), /bienvenue (messages d'accueil personnalisés ou générés par l'IA), /rolereaction, /envoyer,
-commandes personnalisées (/commande, /cc, !nom).
-
-MODÉRATION : /punition panel|deban, mute vocal, rôles (/role), /silence, /purge, /annonce, /creersalon,
-/supprimersalon, auto-modération et sanctions automatiques activables (/automod, y compris les insultes envers
-le bot).
-
-ADMIN : /adminpanel (panneau unique pour modifier toutes les fonctionnalités, remplace /config), /aideadmin,
-/creeserveur (l'IA génère rôles, salons et permissions), /optimiser (perf + conseils), /style, /logs, /test.
-
-LOGS : sélectionnables par type (sanctions, commandes, rôles, automod, tickets, actions admin, arrivées,
-messages, vocal). Les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles,
-deban) ET les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
+LOGS : toutes les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles, deban)
+ET toutes les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
 avec /logs.
 
 Python 3.10+ requis. Voir .env.example pour la config.
@@ -42,13 +28,15 @@ import os
 import posixpath
 import random
 import re
+import shutil
+import tempfile
 import time
 import unicodedata
 import zipfile
 from collections import Counter, defaultdict, deque
 from datetime import timedelta
 from itertools import combinations
-from typing import Optional
+from typing import Optional, Union
 
 import aiosqlite
 import discord
@@ -81,6 +69,7 @@ REACT_CHANCE = float(os.getenv("REACT_CHANCE", "0.05"))         # chance d'une r
 SPONT_CHANCE = float(os.getenv("SPONTANEOUS_CHANCE", "0.03"))   # chance de rebondir sans être appelé
 PHRASE_CHANCE = float(os.getenv("PHRASE_CHANCE", "0.60"))       # chance d'une phrase "mommy" sur câlin/bisou en chat
 NAME_TRIGGER = os.getenv("NAME_TRIGGER", "1") == "1"            # répond aussi quand on écrit son prénom (sans ping)
+GW_CMD = "givawayyy"                                            # nom de la commande giveaway (change-le ici si besoin)
 
 # =====================================================================
 # CHARTE GRAPHIQUE (e-girl : violet, rose, noir — sobre)
@@ -102,6 +91,35 @@ def emb(title: Optional[str] = None, description: Optional[str] = None, color: i
     e = discord.Embed(title=title, description=description, color=color)
     e.set_footer(text=random.choice(FOOTERS))
     return e
+
+
+# ---------- Mise en page aérée (aperçus) ----------
+SP = "\u200b"  # caractère invisible : sert à ajouter du vide sous un champ
+
+
+def airy(lines, gap: int = 1) -> str:
+    """Assemble des blocs avec `gap` ligne(s) vide(s) entre chaque (rendu aéré)."""
+    return ("\n" * (gap + 1)).join(str(x) for x in lines if x)
+
+
+def fit_lines(lines, limit: int = 1024, gap: int = 1) -> str:
+    """Comme airy(), mais coupe proprement par ligne entière pour rester sous `limit` caractères."""
+    sep = "\n" * (gap + 1)
+    lines = [str(x) for x in lines if x]
+    full = sep.join(lines)
+    if len(full) <= limit:
+        return full
+    out: list = []
+    for x in lines:
+        if len(sep.join(out + [x, "…"])) > limit:
+            break
+        out.append(x)
+    return sep.join(out + ["…"]) if out else full[: limit - 1] + "…"
+
+
+def quote_block(text: str, limit: int = 3500) -> str:
+    """Met un texte dans une citation Discord (barre verticale) : il se détache du reste de l'embed."""
+    return "\n".join(f"> {l}" if l.strip() else ">" for l in str(text)[:limit].split("\n"))
 
 
 # =====================================================================
@@ -396,13 +414,53 @@ CREATE TABLE IF NOT EXISTS kahoots (
     id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, author_id INTEGER NOT NULL,
     title TEXT NOT NULL, questions TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_kahoots_guild ON kahoots(guild_id, author_id);
+CREATE TABLE IF NOT EXISTS giveaways (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL DEFAULT 0, host_id INTEGER NOT NULL, prize TEXT NOT NULL,
+    winners INTEGER NOT NULL DEFAULT 1, role_id INTEGER NOT NULL DEFAULT 0, ends_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open', winner_ids TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS idx_giveaways_open ON giveaways(status, ends_at);
+CREATE INDEX IF NOT EXISTS idx_giveaways_guild ON giveaways(guild_id, status);
+CREATE TABLE IF NOT EXISTS giveaway_entries (
+    giveaway_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (giveaway_id, user_id));
+CREATE TABLE IF NOT EXISTS rules_pending (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, deadline INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL DEFAULT 0, message_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_rules_deadline ON rules_pending(deadline);
 """
+
+
+class MikaTree(app_commands.CommandTree):
+    """Arbre de commandes avec un contrôle global : aucune commande dans les salons interdits (/interdit)."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id is None or interaction.channel is None:
+            return True
+        if interaction.type is not discord.InteractionType.application_command:
+            return True
+        if (interaction.data or {}).get("name") in INTERDIT_EXEMPT:
+            return True
+        try:
+            blocked = await channel_banned(interaction.channel, interaction.guild_id)
+        except Exception:  # noqa: BLE001 : en cas de doute on laisse passer
+            log.exception("interaction_check")
+            return True
+        if blocked:
+            try:
+                await interaction.response.send_message(
+                    "🚫 Je n'ai pas le droit de parler dans ce salon. Essaie ailleurs, petit chat 😏", ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
+            return False
+        return True
 
 
 class MikaBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents, allowed_mentions=NO_PINGS)
-        self.tree = app_commands.CommandTree(self)
+        self.tree = MikaTree(self)
         self.db: aiosqlite.Connection
 
     async def setup_hook(self):
@@ -410,11 +468,17 @@ class MikaBot(discord.Client):
         await self.db.executescript(SCHEMA)
         await self.db.commit()
         # boutons persistants (rôles, sondages, tickets) : actifs même après un redémarrage
-        self.add_dynamic_items(RoleButton, PollVote, PollEnd, TicketOpen, TicketClose, TicketClaim)
+        self.add_dynamic_items(
+            RoleButton, PollVote, PollEnd, TicketOpen, TicketClose, TicketClaim, GiveawayJoin, RulesButton
+        )
         if not voice_timer_loop.is_running():
             voice_timer_loop.start()
         if not poll_loop.is_running():
             poll_loop.start()
+        if not giveaway_loop.is_running():
+            giveaway_loop.start()
+        if not rules_loop.is_running():
+            rules_loop.start()
         # Sync des commandes seulement si elles ont changé (ou SYNC_ON_START=1, ou /sync)
         sig = commands_signature()
         rows = await db_all("SELECT value FROM settings WHERE guild_id=0 AND key='cmd_sig'")
@@ -432,6 +496,10 @@ class MikaBot(discord.Client):
             voice_timer_loop.cancel()
         if poll_loop.is_running():
             poll_loop.cancel()
+        if giveaway_loop.is_running():
+            giveaway_loop.cancel()
+        if rules_loop.is_running():
+            rules_loop.cancel()
         if hasattr(self, "db"):
             await self.db.close()
         await super().close()
@@ -2828,7 +2896,8 @@ async def aide(interaction: discord.Interaction):
             "`/statu [@membre]` → profil complet (statut, jeux, argent).\n"
             "`/emoji agrandir` → un emoji perso en grand.\n"
             "`/cc nom` ou `!nom` → commandes personnalisées du serveur.\n"
-            "`/info` → les stats du serveur."
+            "`/info` → les stats du serveur.\n"
+            "`/vocal rejoindre|dire|ask|quitter` → je viens dans ton vocal et je parle à voix haute."
         ),
         inline=False,
     )
@@ -2839,6 +2908,14 @@ async def aide(interaction: discord.Interaction):
             "🎫 **Tickets** → clique sur « Ouvrir un ticket » dans le salon d'assistance ; `/ticket fermer` pour clore.\n"
             "`/dev projet` → l'IA te génère un site / une app (zip prêt à lancer).\n"
             "`/dev question` → aide au code : bug, architecture, explication."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎉 Giveaways & règles",
+        value=(
+            "Sous un giveaway, clique sur **🎉 Participer** (re-clique pour te retirer).\n"
+            "`/regle afficher` → relis les règles du serveur."
         ),
         inline=False,
     )
@@ -2873,6 +2950,8 @@ async def aideadmin(interaction: discord.Interaction):
         value=(
             "`/adminpanel` → panneau complet (fonctionnalités, modération, logs avec choix des types, économie, accueil, outils).\n"
             "`/style` → dominatrice, mommy, douce ou sarcastique.\n"
+            "`/autorole definir|retirer|etat` → rôle donné automatiquement aux nouveaux (membres ou bots).\n"
+            "`/interdit ajouter|retirer|liste|vider` → salons ou catégories où je ne parle plus.\n"
             "`/logs` → salon des logs : **toutes les sanctions** et **toutes les commandes du bot** y sont tracées."
         ),
         inline=False,
@@ -2906,7 +2985,7 @@ async def aideadmin(interaction: discord.Interaction):
         name="🎭 Serveur",
         value=(
             "`/rolereaction` → panneau de rôles à boutons.\n"
-            "`/envoyer` → message anonyme ou sous un pseudo perso.\n"
+            "`/envoyer` → message anonyme, sous un pseudo perso ou **avec l'identité du bot**.\n"
             "`/emoji ajouter` → ajouter un emoji au serveur.\n"
             "`/commande ajouter|modifier|supprimer|liste` → commandes perso (utilisables avec `/cc nom` ou `!nom`).\n"
             "`/sync` → (owner du bot) resynchroniser les commandes."
@@ -2951,6 +3030,22 @@ async def aideadmin(interaction: discord.Interaction):
             "(`contenu:True` = supprime aussi ce qu'elle contient). Confirmation + log.\n"
             "`/role creer nom [couleur] [permissions] [affiche] [mentionnable] [membre]` → crée un rôle.\n"
             "`/role supprimer role` → supprime un rôle (confirmation + log)."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="📜 Règles obligatoires",
+        value=(
+            "`/regle serveur [actif] [salon] [role] [delai] [texte]` → les nouveaux membres doivent **accepter** "
+            "les règles (bouton) : refus ou délai dépassé = expulsion. Le salon doit être visible des nouveaux."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="🎉 Giveaways",
+        value=(
+            f"`/{GW_CMD} lancer lot duree [gagnants] [salon] [role_requis]` → giveaway à bouton, tirage automatique.\n"
+            f"`/{GW_CMD} terminer|relancer|annuler|liste` → les gérer (choix dans la liste)."
         ),
         inline=False,
     )
@@ -3113,16 +3208,22 @@ WX_STANDALONE = re.compile(r"^\W*(?:(?:quelle|quel)\s+(?:est\s+)?)?(?:la\s+)?m[�
 WX_CITY = re.compile(
     r"\bm[ée]t[ée]o\b[\s,:]*(?:(?:à|a|de|du|des|en|sur|pour|dans)\s+)?([^?!.,;:\n]{2,50})", re.I
 )
-WX_TIME_END = re.compile(
-    r"(?:\s+(?:aujourd['’]?hui|demain|ce\s+soir|ce\s+matin|maintenant|svp|stp|please|là|actuellement|en\s+ce\s+moment))+\s*$",
-    re.I,
+WX_TIME_WORDS = (
+    r"aujourd['’]?hui|apr[èe]s[\s-]?demain|demain(?:\s+(?:matin|soir|midi|apr[èe]s[\s-]?midi))?|"
+    r"ce\s+(?:soir|matin|midi|week-?end)|cet\s+apr[èe]s[\s-]?midi|cette\s+(?:nuit|semaine)|"
+    r"maintenant|svp|stp|please|là|actuellement|en\s+ce\s+moment"
 )
+WX_TIME_END = re.compile(rf"(?:\s+(?:{WX_TIME_WORDS}))+\s*$", re.I)
 WX_TIME_START = re.compile(
-    r"^(?:aujourd['’]?hui|demain|ce\s+soir|ce\s+matin|maintenant)\s+(?:(?:à|a|de|en|sur|pour|dans)\s+)?", re.I
+    r"^(?:aujourd['’]?hui|demain|apr[èe]s[\s-]?demain|ce\s+soir|ce\s+matin|maintenant)\s+"
+    r"(?:(?:à|a|de|en|sur|pour|dans)\s+)?", re.I,
 )
+# premier mot qui trahit une phrase (« la météo est nulle ») et non un nom de ville
 WX_NOT_CITY = {
     "est", "etait", "était", "sera", "c", "ca", "ça", "il", "elle", "me", "nous", "vous", "tu", "je", "qui", "que",
     "fait", "va", "et", "ou", "trop", "tres", "très", "pas", "nulle", "bien", "mauvaise", "belle", "toujours",
+    "ici", "là", "chez", "dehors", "cette", "ce", "cet", "ces", "quoi", "comment", "comme", "quand", "pourquoi",
+    "hein", "mdr", "lol", "vraiment", "encore", "déjà", "deja", "toute", "tout", "bof", "super", "horrible",
 }
 
 
@@ -3138,15 +3239,19 @@ def weather_request(text: str) -> Optional[str]:
     if not m:
         return ""
     city = m.group(1).strip()
-    for _ in range(3):  # retire « aujourd'hui », « demain »... en début / fin
+    for _ in range(3):  # retire « aujourd'hui », « demain matin »... en début / fin
         city = WX_TIME_START.sub("", city).strip()
         city = WX_TIME_END.sub("", city).strip()
     city = city.strip(" '\"«»-")
     if not city:
         return ""
-    if city.lower().replace("’", "'") in {"aujourd'hui", "aujourdhui", "demain", "ce soir", "ce matin", "maintenant"}:
+    low = city.lower().replace("’", "'")
+    if low in {"aujourd'hui", "aujourdhui", "demain", "ce soir", "ce matin", "maintenant"}:
         return ""
-    low = city.lower()
+    if not re.search(r"[^\W\d_]", city):  # que des chiffres / symboles : pas une ville
+        return ""
+    if re.split(r"[\s']", low)[0] in WX_NOT_CITY or len(city.split()) > 5:
+        return None  # c'est une phrase (« la météo est nulle »), pas une demande
     if low.startswith("au "):
         city = "Le " + city[3:]
     elif low.startswith("aux "):
@@ -3178,22 +3283,53 @@ def wx_quip(temp: float, code: int) -> str:
     return random.choice(pool)
 
 
+def _geo_candidates(city: str) -> list[str]:
+    """« Paris France » / « Lyon, France » : si le nom complet ne donne rien, on essaie des versions plus courtes."""
+    out = [city]
+    first = re.split(r"\s*[,(]\s*", city)[0].strip()
+    parts = first.split()
+    for c in (first, " ".join(parts[:-1]) if len(parts) > 1 else "", parts[0] if len(parts) > 1 else ""):
+        if len(c) >= 2 and c.lower() not in {x.lower() for x in out}:
+            out.append(c)
+    return out
+
+
+async def _wx_get(client: httpx.AsyncClient, url: str, params: dict) -> dict:
+    """GET avec 3 essais (coupure réseau, 429, 5xx) : le service gratuit a des à-coups, surtout sur un hébergeur."""
+    for attempt in range(3):
+        try:
+            r = await client.get(url, params=params)
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(1 + attempt)
+            continue
+        if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            await asyncio.sleep(1 + attempt)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise RuntimeError("météo : essais épuisés")  # inatteignable
+
+
 async def fetch_weather(city: str) -> discord.Embed:
     """Géocode la ville puis récupère la météo actuelle + 3 jours (Open-Meteo, gratuit, sans clé)."""
-    async with httpx.AsyncClient(timeout=8) as client:
-        g = await client.get(GEO_URL, params={"name": city, "count": 1, "language": "fr", "format": "json"})
-        g.raise_for_status()
-        results = g.json().get("results") or []
-        if not results:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0, connect=5.0), headers={"User-Agent": "MikaBot-Discord"}
+    ) as client:
+        place = None
+        for cand in _geo_candidates(city):
+            g = await _wx_get(client, GEO_URL, {"name": cand, "count": 1, "language": "fr", "format": "json"})
+            if g.get("results"):
+                place = g["results"][0]
+                break
+        if place is None:
             raise CityNotFound(city)
-        place = results[0]
-        w = await client.get(FORECAST_URL, params={
+        data = await _wx_get(client, FORECAST_URL, {
             "latitude": place["latitude"], "longitude": place["longitude"], "timezone": "auto", "forecast_days": 3,
             "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
         })
-        w.raise_for_status()
-        data = w.json()
 
     cur, daily = data["current"], data["daily"]
     temp, code = cur["temperature_2m"], int(cur["weather_code"])
@@ -3404,17 +3540,18 @@ async def get_relay_webhook(channel):
     return await base.create_webhook(name=RELAY_NAME, reason="Relais pour /envoyer"), thread
 
 
-@bot.tree.command(name="envoyer", description="(admin) Envoie un message anonyme ou sous un pseudo perso ✉️")
+@bot.tree.command(name="envoyer", description="(admin) Envoie un message anonyme, sous un pseudo perso ou en tant que bot ✉️")
 @app_commands.describe(
     message="Le message (\\n = retour à la ligne)",
     identite="Qui apparaît comme expéditeur",
     pseudo="Le pseudo à afficher (pour « Pseudo perso »)",
     salon="Salon d'envoi (ici par défaut)",
-    avatar="URL d'une image d'avatar (optionnel, https)",
+    avatar="URL d'une image d'avatar (optionnel, https ; ignoré avec l'identité du bot)",
 )
 @app_commands.choices(identite=[
     app_commands.Choice(name="🕶️ Anonyme", value="anon"),
     app_commands.Choice(name="🎭 Pseudo perso", value="perso"),
+    app_commands.Choice(name="🤖 Identité du bot", value="bot"),
 ])
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True)
@@ -3427,23 +3564,32 @@ async def envoyer(
     channel = salon or interaction.channel
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         return await interaction.response.send_message("Je ne peux pas écrire dans ce type de salon.", ephemeral=True)
-    name = "Anonyme" if identite.value == "anon" else (pseudo or "").strip()
-    if not name:
-        return await interaction.response.send_message("Donne un `pseudo` pour l'identité « Pseudo perso ».", ephemeral=True)
-    if any(w in name.lower() for w in ("discord", "clyde")):
-        return await interaction.response.send_message("Discord interdit « discord » et « clyde » dans un pseudo.", ephemeral=True)
-    if avatar and not (avatar.startswith("https://") and len(avatar) <= 300):
-        return await interaction.response.send_message("L'avatar doit être une URL https valide.", ephemeral=True)
+    as_bot = identite.value == "bot"
+    if as_bot:
+        name = BOT_NAME  # le message part directement du compte du bot (pas de webhook)
+    else:
+        name = "Anonyme" if identite.value == "anon" else (pseudo or "").strip()
+        if not name:
+            return await interaction.response.send_message("Donne un `pseudo` pour l'identité « Pseudo perso ».", ephemeral=True)
+        if any(w in name.lower() for w in ("discord", "clyde")):
+            return await interaction.response.send_message("Discord interdit « discord » et « clyde » dans un pseudo.", ephemeral=True)
+        if avatar and not (avatar.startswith("https://") and len(avatar) <= 300):
+            return await interaction.response.send_message("L'avatar doit être une URL https valide.", ephemeral=True)
     text = message.replace("\\n", "\n")[:2000]
     allowed = discord.AllowedMentions(everyone=False, roles=False, users=True)
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        hook, thread = await get_relay_webhook(channel)
-        await hook.send(
-            content=text, username=name[:80], avatar_url=avatar or discord.utils.MISSING,
-            allowed_mentions=allowed, thread=thread or discord.utils.MISSING,
-        )
+        if as_bot:
+            await channel.send(text, allowed_mentions=allowed)
+        else:
+            hook, thread = await get_relay_webhook(channel)
+            await hook.send(
+                content=text, username=name[:80], avatar_url=avatar or discord.utils.MISSING,
+                allowed_mentions=allowed, thread=thread or discord.utils.MISSING,
+            )
     except discord.Forbidden:
+        if as_bot:
+            return await interaction.followup.send(f"🚫 Je ne peux pas écrire dans {channel.mention}.", ephemeral=True)
         if identite.value == "anon":
             try:
                 await channel.send(text, allowed_mentions=allowed)
@@ -3456,11 +3602,12 @@ async def envoyer(
     except discord.HTTPException as e:
         log.warning("/envoyer : %s", e)
         return await interaction.followup.send("😅 Discord a refusé l'envoi (pseudo ou avatar invalide ?).", ephemeral=True)
-    await interaction.followup.send(f"✅ Envoyé dans {channel.mention} en tant que **{name}**.", ephemeral=True)
+    who = f"**{name}** (identité du bot)" if as_bot else f"**{name}**"
+    await interaction.followup.send(f"✅ Envoyé dans {channel.mention} en tant que {who}.", ephemeral=True)
     # trace pour le staff : l'anonymat vaut vis-à-vis des membres, pas des admins
     le = discord.Embed(title="✉️ /envoyer utilisé", color=COLOR_DARK)
     le.add_field(name="Admin", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
-    le.add_field(name="Identité", value=name, inline=True)
+    le.add_field(name="Identité", value=f"{name} (bot)" if as_bot else name, inline=True)
     le.add_field(name="Salon", value=channel.mention, inline=True)
     le.add_field(name="Message", value=text[:1000], inline=False)
     le.timestamp = discord.utils.utcnow()
@@ -3803,7 +3950,7 @@ class VoiceModal(discord.ui.Modal):
         super().__init__(title=f"{VOICE_META[action][1]} · {target.display_name}"[:45], timeout=300)
         self.action, self.target = action, target
         self.duree = discord.ui.TextInput(
-            label="Durée (10, 30m, 2h, 1j…) — vide = jusqu'à retrait", required=False, max_length=10,
+            label="Durée (10, 30m, 2h, 1j…) · vide = illimité", required=False, max_length=10,
         )
         self.raison = discord.ui.TextInput(
             label="Raison (optionnel)", required=False, max_length=200, style=discord.TextStyle.paragraph
@@ -4190,6 +4337,7 @@ EXPECTED_COMMANDS = {
     "solde", "daily", "donner", "richesse", "eco", "ecopanel", "reglepoker", "regleblackjack", "main",
     "creersalon", "creeserveur", "info", "automod",
     "optimiser", "dev", "bienvenue", "sondage", "ticket", "annonce", "purge", "kahoot", "jeux",
+    "regle", GW_CMD, "autorole", "interdit", "vocal",
 }
 REMOVED_COMMANDS = {"musique", "gouts", "favori", "inventaire", "stat"}
 
@@ -4203,7 +4351,7 @@ async def _t_db() -> str:
     await db_run("DELETE FROM settings WHERE guild_id=-1 AND key='test'")
     assert rows and rows[0][0] == "ok", "relecture incorrecte"
     for table in ("history", "settings", "marriages", "marriage_members", "custom_cmds", "game_stats",
-                  "voice_timers", "economy", "automod_strikes"):
+                  "voice_timers", "economy", "automod_strikes", "giveaways", "giveaway_entries", "rules_pending"):
         await db_all(f"SELECT 1 FROM {table} LIMIT 1")
     return "lecture / écriture OK"
 
@@ -4309,6 +4457,8 @@ async def _t_weather_parse() -> str:
         "météo Lyon": "Lyon", "Quelle est la météo à Paris aujourd'hui ?": "Paris",
         "météo à Fort-de-France": "Fort-de-France", "il fait quoi comme météo à Nice demain": "Nice",
         "la météo": "", "la météo est nulle aujourd'hui": None, "bonjour": None,
+        "la météo à Paris demain matin": "Paris", "météo à La Rochelle ce week-end": "La Rochelle",
+        "la météo ici est horrible": None, "météo 2024": "",
     }
     for text, expected in cases.items():
         got = weather_request(text)
@@ -4504,12 +4654,15 @@ class SilenceModal(discord.ui.Modal, title="🤫 Mode silence"):
 
 class SendModal(discord.ui.Modal, title="✉️ Envoyer un message"):
     message = discord.ui.TextInput(label="Message (\\n = retour à la ligne)", style=discord.TextStyle.paragraph, max_length=2000)
-    pseudo = discord.ui.TextInput(label="Pseudo (vide = Anonyme)", required=False, max_length=32)
+    pseudo = discord.ui.TextInput(
+        label="Pseudo (vide = anonyme, bot = moi)", required=False, max_length=32,
+        placeholder="Vide = Anonyme • « bot » = j'envoie avec l'identité du bot",
+    )
     avatar = discord.ui.TextInput(label="URL d'avatar https (optionnel)", required=False, max_length=300)
 
     async def on_submit(self, interaction: discord.Interaction):
         pseudo = self.pseudo.value.strip()
-        ident = app_commands.Choice(name="", value="perso" if pseudo else "anon")
+        ident = app_commands.Choice(name="", value="bot" if pseudo.lower() == "bot" else "perso" if pseudo else "anon")
         # /envoyer écrit déjà son propre log détaillé
         await envoyer.callback(
             interaction, self.message.value, ident, pseudo or None, None, self.avatar.value.strip() or None
@@ -5320,25 +5473,40 @@ def normalize_plan(data: dict, max_channels: int, max_roles: int) -> dict:
     return {"roles": roles, "categories": cats, "total": total}
 
 
-def plan_embed(plan: dict, theme: str) -> discord.Embed:
+def plan_embed(plan: dict, theme: str, compact: bool = False) -> discord.Embed:
+    """Aperçu du serveur. Version aérée par défaut ; `compact` = ancienne mise en page (si l'embed est trop gros)."""
+    gap = 0 if compact else 1
+    nb_r, nb_c, nb_s = len(plan["roles"]), len(plan["categories"]), plan["total"]
     e = emb(
         "🏗️ Aperçu du serveur",
-        f"Thème : **{theme[:100]}**\n{len(plan['roles'])} rôle(s) • {plan['total']} salon(s) • "
-        f"{len(plan['categories'])} catégorie(s)\n\n**Rien n'est créé tant que tu n'as pas confirmé.** "
-        "Rien n'est supprimé non plus.",
+        airy([
+            f"🎨 Thème : **{theme[:100]}**",
+            f"🎭 **{nb_r}** rôle(s)  •  📁 **{nb_c}** catégorie(s)  •  💬 **{nb_s}** salon(s)",
+            "🔒 **Rien n'est créé tant que tu n'as pas confirmé.**\n_Rien n'est supprimé non plus._",
+        ], gap),
         COLOR_PINK,
     )
+    tail = "" if compact else "\n" + SP
     if plan["roles"]:
-        txt = "\n".join(f"• **{r['nom']}** — {r['preset']}" for r in plan["roles"])
-        e.add_field(name="🎭 Rôles", value=txt[:1024], inline=False)
-    for c in plan["categories"][:10]:
+        txt = fit_lines([f"▫️ **{r['nom']}** — {r['preset']}" for r in plan["roles"]], 1000, gap)
+        e.add_field(name="🎭 Rôles", value=txt + tail, inline=False)
+    cats = plan["categories"][:10]
+    for c in cats:
         lines = []
-        for s in c["salons"]:
-            icon = "🔊" if s["type"] == "vocal" else "💬"
-            tag = "🔒" if s["acces"] in ("staff", "roles") else "📖" if s["acces"] == "lecture" else ""
-            lines.append(f"{icon}{tag} {s['nom']}")
-        e.add_field(name=f"📁 {c['nom']}"[:256], value="\n".join(lines)[:1024], inline=True)
-    e.set_footer(text="💬 texte • 🔊 vocal • 🔒 privé • 📖 lecture seule")
+        for s_ in c["salons"]:
+            icon = "🔊" if s_["type"] == "vocal" else "💬"
+            tag = "🔒" if s_["acces"] in ("staff", "roles") else "📖" if s_["acces"] == "lecture" else ""
+            lines.append(f"{icon}{tag}  {s_['nom']}")
+        e.add_field(
+            name=f"📁 {c['nom']}"[:256],
+            value=fit_lines(lines, 1000, gap) + tail,
+            inline=compact,
+        )
+    if len(plan["categories"]) > len(cats):
+        e.add_field(name=SP, value=f"_… et {len(plan['categories']) - len(cats)} autre(s) catégorie(s)_", inline=False)
+    e.set_footer(text="💬 texte  •  🔊 vocal  •  🔒 privé  •  📖 lecture seule")
+    if not compact and len(e) > 5800:  # limite Discord = 6000 caractères par embed
+        return plan_embed(plan, theme, compact=True)
     return e
 
 
@@ -5960,6 +6128,8 @@ class OptimView(_OwnerView):
             ("DELETE FROM poll_votes WHERE poll_id NOT IN (SELECT id FROM polls)", ()),
             ("DELETE FROM tickets WHERE status='closed' AND closed_at>0 AND closed_at<?", (now - 90 * 86400,)),
             ("DELETE FROM automod_strikes WHERE last_at<?", (now - 30 * 86400,)),
+            ("DELETE FROM giveaways WHERE status!='open' AND ends_at<?", (now - 60 * 86400,)),
+            ("DELETE FROM giveaway_entries WHERE giveaway_id NOT IN (SELECT id FROM giveaways)", ()),
         ):
             cur = await bot.db.execute(sql, params)
             removed += max(cur.rowcount, 0)
@@ -6245,11 +6415,13 @@ async def build_welcome(member: discord.Member, *, allow_ai: bool = True) -> str
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    spawn(autorole_apply(member))  # rôle automatique (membres ou bots) : indépendant de l'accueil
     if member.bot:
         return
     gid = member.guild.id
     _join_times[gid].append(time.time())
     spawn(join_log(member))
+    spawn(rules_on_join(member))  # règles à accepter (si activées) : indépendant du message de bienvenue
     if not await get_flag(gid, "welcome_on", False):
         return
     ch = member.guild.get_channel(await get_int(gid, "welcome_channel"))
@@ -6330,6 +6502,432 @@ async def bienvenue_config(
     await interaction.response.send_message(embed=await welcome_state_embed(interaction.guild), ephemeral=True)
 
 
+# =====================================================================
+# 🎀 RÔLE AUTOMATIQUE À L'ARRIVÉE : /autorole definir | retirer | etat
+# =====================================================================
+async def autorole_apply(member: discord.Member):
+    """Donne le rôle automatique (membres ou bots). Un échec ne doit jamais gêner l'arrivée : on log et on passe."""
+    try:
+        guild = member.guild
+        rid = await get_int(guild.id, "autorole_bot" if member.bot else "autorole")
+        if not rid:
+            return
+        role, me = guild.get_role(rid), guild.me
+        if role is None or me is None or not me.guild_permissions.manage_roles:
+            log.warning("Rôle auto : rôle introuvable ou permission « Gérer les rôles » manquante sur %s", guild.id)
+            return
+        if role.is_default() or role.managed or role >= me.top_role:
+            log.warning("Rôle auto : « %s » est au-dessus de mon rôle sur %s", role.name, guild.id)
+            return
+        if role in member.roles:
+            return
+        await member.add_roles(role, reason="Rôle automatique à l'arrivée")
+        le = discord.Embed(title="🎀 Rôle automatique", color=0x7ED6A5)
+        le.set_thumbnail(url=member.display_avatar.url)
+        le.add_field(name="Membre", value=f"{member.mention} (`{member.id}`)", inline=True)
+        le.add_field(name="Rôle", value=role.mention, inline=True)
+        le.timestamp = discord.utils.utcnow()
+        await mod_log(guild, le)
+    except discord.HTTPException as e:
+        log.warning("Rôle auto : Discord a refusé (%s)", e)
+    except Exception:  # noqa: BLE001
+        log.exception("autorole_apply")
+
+
+autorole_group = app_commands.Group(
+    name="autorole", description="(staff) Rôle donné automatiquement aux nouveaux 🎀",
+    guild_only=True, default_permissions=discord.Permissions(manage_guild=True),
+)
+AUTOROLE_CIBLES = [
+    app_commands.Choice(name="👤 Membres", value="membres"),
+    app_commands.Choice(name="🤖 Bots", value="bots"),
+]
+
+
+def _autorole_target(cible: Optional[app_commands.Choice[str]]) -> tuple[str, str]:
+    return ("autorole_bot", "bots") if cible is not None and cible.value == "bots" else ("autorole", "membres")
+
+
+def _autorole_problem(interaction: discord.Interaction, role: discord.Role) -> Optional[str]:
+    guild, me, inv = interaction.guild, interaction.guild.me, interaction.user
+    if role.is_default() or role.managed:
+        return "Ce rôle ne peut pas être attribué (@everyone ou rôle géré par une intégration)."
+    if me is None or not me.guild_permissions.manage_roles:
+        return "Il me faut la permission « Gérer les rôles »."
+    if role >= me.top_role:
+        return f"« {role.name} » est au-dessus de mon rôle : monte mon rôle dans la hiérarchie."
+    if inv.id != guild.owner_id and role >= inv.top_role:
+        return f"« {role.name} » est au même niveau que ton rôle, ou au-dessus."
+    return None
+
+
+@autorole_group.command(name="definir", description="Choisis le rôle donné à chaque arrivée")
+@app_commands.describe(role="Le rôle à donner automatiquement", cible="Pour qui : membres (par défaut) ou bots")
+@app_commands.choices(cible=AUTOROLE_CIBLES)
+@staff_only
+async def autorole_definir(
+    interaction: discord.Interaction, role: discord.Role, cible: Optional[app_commands.Choice[str]] = None,
+):
+    problem = _autorole_problem(interaction, role)
+    if problem:
+        return await interaction.response.send_message(f"🚫 {problem}", ephemeral=True)
+    key, label = _autorole_target(cible)
+    await set_setting(interaction.guild_id, key, str(role.id))
+    await interaction.response.send_message(
+        f"🎀 Les **{label}** qui arrivent recevront {role.mention}.", ephemeral=True, allowed_mentions=NO_PINGS
+    )
+
+
+@autorole_group.command(name="retirer", description="Arrête de donner un rôle automatique")
+@app_commands.describe(cible="Pour qui : membres (par défaut) ou bots")
+@app_commands.choices(cible=AUTOROLE_CIBLES)
+@staff_only
+async def autorole_retirer(interaction: discord.Interaction, cible: Optional[app_commands.Choice[str]] = None):
+    key, label = _autorole_target(cible)
+    if not await get_int(interaction.guild_id, key):
+        return await interaction.response.send_message(f"Il n'y a pas de rôle automatique pour les {label} 😏", ephemeral=True)
+    await set_setting(interaction.guild_id, key, "0")
+    await interaction.response.send_message(f"✂️ Plus de rôle automatique pour les **{label}**.", ephemeral=True)
+
+
+@autorole_group.command(name="etat", description="Voir les rôles automatiques en place")
+@staff_only
+async def autorole_etat(interaction: discord.Interaction):
+    guild = interaction.guild
+    lines = []
+    for key, label in (("autorole", "👤 Membres"), ("autorole_bot", "🤖 Bots")):
+        rid = await get_int(guild.id, key)
+        role = guild.get_role(rid) if rid else None
+        if not rid:
+            val = "— aucun"
+        elif role is None:
+            val = "⚠️ ce rôle n'existe plus"
+        elif role >= guild.me.top_role or not guild.me.guild_permissions.manage_roles:
+            val = f"{role.mention} ⚠️ je ne peux pas le donner (permissions ou hiérarchie)"
+        else:
+            val = f"{role.mention} ✅"
+        lines.append(f"**{label}** : {val}")
+    await interaction.response.send_message(embed=emb("🎀 Rôles automatiques", "\n".join(lines), COLOR_PINK), ephemeral=True)
+
+
+# =====================================================================
+# 🚫 SALONS INTERDITS AU BOT : /interdit ajouter | retirer | liste | vider
+# =====================================================================
+BAN_KEY = "banned_channels"
+INTERDIT_EXEMPT = {"interdit"}  # toujours utilisable : sinon impossible de lever une interdiction
+MAX_BANNED = 50
+BanTarget = Union[
+    discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.CategoryChannel, discord.ForumChannel
+]
+
+
+async def banned_ids(gid: Optional[int]) -> set[int]:
+    if not gid:
+        return set()
+    raw = await get_setting(gid, BAN_KEY, "")
+    return {int(x) for x in raw.split(",") if x.strip().isdigit()}
+
+
+async def _save_banned(gid: int, ids: set[int]):
+    await set_setting(gid, BAN_KEY, ",".join(str(i) for i in sorted(ids)))
+
+
+def channel_chain(channel) -> set[int]:
+    """Le salon + son parent (fil → salon) + sa catégorie : interdire une catégorie interdit tous ses salons."""
+    ids: set[int] = set()
+    if channel is None:
+        return ids
+    ids.add(channel.id)
+    pid = getattr(channel, "parent_id", None)  # fil de discussion
+    if pid:
+        ids.add(pid)
+    base = getattr(channel, "parent", None) or channel
+    cat = getattr(base, "category_id", None)
+    if cat:
+        ids.add(cat)
+    return ids
+
+
+async def channel_banned(channel, gid: Optional[int] = None) -> bool:
+    gid = gid or getattr(getattr(channel, "guild", None), "id", None)
+    if not gid:
+        return False
+    banned = await banned_ids(gid)
+    return bool(banned and banned & channel_chain(channel))
+
+
+interdit_group = app_commands.Group(
+    name="interdit", description="(staff) Salons où je ne dois plus parler 🚫",
+    guild_only=True, default_permissions=discord.Permissions(manage_guild=True),
+)
+
+
+@interdit_group.command(name="ajouter", description="Je ne réponds plus dans ce salon ou cette catégorie")
+@app_commands.describe(salon="Salon, vocal, forum ou catégorie à interdire")
+@staff_only
+async def interdit_ajouter(interaction: discord.Interaction, salon: BanTarget):
+    gid = interaction.guild_id
+    ids = await banned_ids(gid)
+    if salon.id in ids:
+        return await interaction.response.send_message(f"😏 {salon.mention} est déjà interdit.", ephemeral=True)
+    if len(ids) >= MAX_BANNED:
+        return await interaction.response.send_message(f"🚫 Maximum {MAX_BANNED} interdictions : retire-en une d'abord.", ephemeral=True)
+    ids.add(salon.id)
+    await _save_banned(gid, ids)
+    is_cat = getattr(salon, "type", None) == discord.ChannelType.category
+    where = f"la catégorie {salon.mention} (et tous ses salons)" if is_cat else salon.mention
+    await interaction.response.send_message(
+        f"🚫 Je ne parlerai plus dans {where} : ni réponses, ni réactions, ni commandes. "
+        "(L'auto-modération continue de veiller.) `/interdit retirer` pour annuler.",
+        ephemeral=True,
+    )
+
+
+@interdit_group.command(name="retirer", description="Je peux de nouveau parler dans ce salon ou cette catégorie")
+@app_commands.describe(salon="Salon, vocal, forum ou catégorie à autoriser de nouveau")
+@staff_only
+async def interdit_retirer(interaction: discord.Interaction, salon: BanTarget):
+    gid = interaction.guild_id
+    ids = await banned_ids(gid)
+    if salon.id not in ids:
+        return await interaction.response.send_message(f"😏 {salon.mention} n'est pas interdit.", ephemeral=True)
+    ids.discard(salon.id)
+    await _save_banned(gid, ids)
+    await interaction.response.send_message(f"✅ Je peux de nouveau parler dans {salon.mention}.", ephemeral=True)
+
+
+@interdit_group.command(name="liste", description="Voir les salons où je n'ai pas le droit de parler")
+@staff_only
+async def interdit_liste(interaction: discord.Interaction):
+    ids = await banned_ids(interaction.guild_id)
+    if not ids:
+        return await interaction.response.send_message("Aucun salon interdit : je parle partout 😏", ephemeral=True)
+    lines = "\n".join(f"• <#{i}>" for i in sorted(ids))
+    await interaction.response.send_message(
+        embed=emb(f"🚫 Salons interdits ({len(ids)})", lines[:4000], COLOR_DARK), ephemeral=True
+    )
+
+
+@interdit_group.command(name="vider", description="Lève toutes les interdictions")
+@staff_only
+async def interdit_vider(interaction: discord.Interaction):
+    if not await banned_ids(interaction.guild_id):
+        return await interaction.response.send_message("Il n'y a aucune interdiction 😏", ephemeral=True)
+    await _save_banned(interaction.guild_id, set())
+    await interaction.response.send_message("✅ Toutes les interdictions sont levées.", ephemeral=True)
+
+
+# =====================================================================
+# 🎙️ MIKA EN VOCAL : /vocal rejoindre | quitter | dire | ask
+# Prérequis (pip) : PyNaCl, edge-tts et imageio-ffmpeg (fournit ffmpeg tout seul). Voix : MIKA_VOICE dans .env.
+# =====================================================================
+VOICE_TTS = os.getenv("MIKA_VOICE", "fr-FR-DeniseNeural")
+VOICE_MAX_CHARS = 350
+_voice_locks: dict[int, asyncio.Lock] = {}
+_TTS_CUSTOM_EMOJI = re.compile(r"<a?:\w+:\d+>")
+_TTS_MENTION = re.compile(r"<(?:@!?|@&|#)\d+>")
+_TTS_URL = re.compile(r"https?://\S+")
+_TTS_EMOJI = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F\u200D]")
+
+
+def tts_clean(text: str) -> str:
+    """Texte lisible à voix haute : sans mentions, liens, markdown ni emojis."""
+    t = _TTS_CUSTOM_EMOJI.sub(" ", text)
+    t = _TTS_MENTION.sub(" ", t)
+    t = _TTS_URL.sub(" lien ", t)
+    t = discord.utils.remove_markdown(t)
+    t = _TTS_EMOJI.sub("", t)
+    return re.sub(r"\s+", " ", t).strip()[:VOICE_MAX_CHARS]
+
+
+def ffmpeg_path() -> Optional[str]:
+    """ffmpeg installé sur la machine, sinon celui fourni par le paquet pip « imageio-ffmpeg » (rien à installer à la main)."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def voice_missing() -> Optional[str]:
+    """None si tout est prêt, sinon la liste de ce qui manque sur l'hébergement."""
+    missing = []
+    if ffmpeg_path() is None:
+        missing.append("ffmpeg (ajoute `imageio-ffmpeg` au requirements.txt)")
+    try:
+        import nacl  # noqa: F401
+    except ImportError:
+        missing.append("PyNaCl")
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        missing.append("edge-tts")
+    return ", ".join(missing) or None
+
+
+async def tts_speak(guild: discord.Guild, text: str) -> bool:
+    """Génère la voix (edge-tts) puis la joue dans le vocal où je suis. Les phrases passent l'une après l'autre."""
+    text = tts_clean(text)
+    vc = guild.voice_client
+    if not text or vc is None or not vc.is_connected():
+        return False
+    import edge_tts
+
+    lock = _voice_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        try:
+            await asyncio.wait_for(edge_tts.Communicate(text, VOICE_TTS).save(path), timeout=30)
+            vc = guild.voice_client
+            if vc is None or not vc.is_connected():
+                return False
+            loop = asyncio.get_running_loop()
+            done: asyncio.Future = loop.create_future()
+
+            def _after(err):
+                loop.call_soon_threadsafe(lambda: done.done() or done.set_result(err))
+
+            vc.play(discord.FFmpegPCMAudio(path, executable=ffmpeg_path() or "ffmpeg"), after=_after)
+            try:
+                await asyncio.wait_for(done, timeout=120)
+            except asyncio.TimeoutError:
+                vc.stop()
+                return False
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("Voix : %r", e)
+            return False
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def voice_auto_leave(guild: discord.Guild):
+    try:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected() or any(not m.bot for m in vc.channel.members):
+            return
+        await asyncio.sleep(20)
+        vc = guild.voice_client
+        if vc is not None and vc.is_connected() and not any(not m.bot for m in vc.channel.members):
+            await vc.disconnect()
+    except Exception:  # noqa: BLE001
+        log.exception("voice_auto_leave")
+
+
+vocal_group = app_commands.Group(
+    name="vocal", description="Je rejoins ton vocal et je parle à voix haute 🎙️", guild_only=True,
+)
+
+
+async def _voice_gate(interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
+    """Vérifie qu'on peut me faire parler : outils présents, moi en vocal, toi dans le même salon."""
+    missing = voice_missing()
+    if missing:
+        await interaction.response.send_message(
+            f"🔧 Je ne peux pas parler : il manque sur l'hébergement **{missing}**. Voir `requirements.txt` / ffmpeg.",
+            ephemeral=True,
+        )
+        return None
+    vc = interaction.guild.voice_client
+    if vc is None or not vc.is_connected():
+        await interaction.response.send_message("Je ne suis dans aucun vocal. Fais `/vocal rejoindre` 😏", ephemeral=True)
+        return None
+    voice = interaction.user.voice
+    if voice is None or voice.channel is None or voice.channel.id != vc.channel.id:
+        await interaction.response.send_message(f"Viens d'abord dans {vc.channel.mention}, petit chat 😏", ephemeral=True)
+        return None
+    return vc
+
+
+@vocal_group.command(name="rejoindre", description="Je rejoins ton salon vocal 🎧")
+@ai_cd()
+async def vocal_rejoindre(interaction: discord.Interaction):
+    missing = voice_missing()
+    if missing:
+        return await interaction.response.send_message(
+            f"🔧 Je ne peux pas parler : il manque sur l'hébergement **{missing}**. Voir `requirements.txt` / ffmpeg.",
+            ephemeral=True,
+        )
+    guild, voice = interaction.guild, interaction.user.voice
+    if voice is None or voice.channel is None:
+        return await interaction.response.send_message("Rejoins d'abord un salon vocal, petit chat 😏", ephemeral=True)
+    ch = voice.channel
+    if await channel_banned(ch, guild.id):
+        return await interaction.response.send_message("🚫 Je n'ai pas le droit de venir dans ce vocal.", ephemeral=True)
+    perms = ch.permissions_for(guild.me)
+    if not (perms.connect and perms.speak):
+        return await interaction.response.send_message(
+            f"🚫 Il me faut « Se connecter » et « Parler » dans {ch.mention}.", ephemeral=True
+        )
+    await interaction.response.defer(thinking=True)
+    try:
+        vc = guild.voice_client
+        if vc is not None and vc.is_connected():
+            if vc.channel.id != ch.id:
+                await vc.move_to(ch)
+        else:
+            await ch.connect(timeout=20, self_deaf=True)
+    except (asyncio.TimeoutError, discord.ClientException, discord.HTTPException) as e:
+        log.warning("Vocal : connexion impossible (%r)", e)
+        return await interaction.followup.send("😅 Je n'arrive pas à me connecter au vocal, réessaie dans un instant.")
+    await interaction.followup.send(
+        f"🎧 Je suis dans {ch.mention}. `/vocal dire` pour me faire parler, `/vocal ask` pour me poser une question."
+    )
+    spawn(tts_speak(guild, f"Coucou, c'est {BOT_NAME}. Je suis là."))
+
+
+@vocal_group.command(name="quitter", description="Je quitte le vocal 👋")
+async def vocal_quitter(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc is None or not vc.is_connected():
+        return await interaction.response.send_message("Je ne suis dans aucun vocal 😏", ephemeral=True)
+    me_in = interaction.user.voice is not None and interaction.user.voice.channel == vc.channel
+    p = interaction.permissions
+    if not (me_in or p.administrator or p.move_members):
+        return await interaction.response.send_message(f"Viens dans {vc.channel.mention} pour me renvoyer 😏", ephemeral=True)
+    await vc.disconnect()
+    await interaction.response.send_message("👋 Je m'en vais. À plus, petit chat 🖤")
+
+
+@vocal_group.command(name="dire", description="Je dis ça à voix haute 🗣️")
+@app_commands.describe(texte="Ce que je dois dire")
+@ai_cd()
+async def vocal_dire(interaction: discord.Interaction, texte: app_commands.Range[str, 1, 300]):
+    if await _voice_gate(interaction) is None:
+        return
+    if not tts_clean(texte):
+        return await interaction.response.send_message("Je n'ai rien à lire dans ça 😏", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ok = await tts_speak(interaction.guild, texte)
+    await interaction.followup.send("🗣️ C'est dit." if ok else "😅 Je n'ai pas réussi à parler, réessaie.", ephemeral=True)
+
+
+@vocal_group.command(name="ask", description="Pose-moi une question, je réponds à voix haute 💬")
+@app_commands.describe(question="Ta question")
+@ai_cd()
+async def vocal_ask(interaction: discord.Interaction, question: app_commands.Range[str, 1, 300]):
+    if await _voice_gate(interaction) is None:
+        return
+    await interaction.response.defer(thinking=True)
+    try:
+        answer = await generate_reply(
+            interaction.channel_id, interaction.user.display_name, interaction.user.id, question,
+            guild_id=interaction.guild_id, nsfw=is_nsfw(interaction.channel),
+        )
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e))
+    for c in split_text(answer):
+        await interaction.followup.send(c, allowed_mentions=NO_PINGS)
+    await tts_speak(interaction.guild, answer)
+
+
 class WelcomePreview(_OwnerView):
     def __init__(self, invoker_id: int, template: str):
         super().__init__(invoker_id)
@@ -6368,8 +6966,12 @@ async def bienvenue_generer(interaction: discord.Interaction, ton: app_commands.
     if not tpl:
         return await interaction.followup.send("😅 Rien de généré, réessaie.", ephemeral=True)
     preview = welcome_render(tpl, interaction.user)
-    e = emb("✨ Aperçu du message de bienvenue", preview, COLOR_PINK)
-    e.add_field(name="Modèle enregistrable", value=f"```{tpl[:900]}```", inline=False)
+    e = emb(
+        "✨ Aperçu du message de bienvenue",
+        airy(["_Voilà ce que verront les nouveaux :_", quote_block(preview, 2500)]),
+        COLOR_PINK,
+    )
+    e.add_field(name="📝 Modèle enregistrable", value=f"{SP}\n```{tpl[:900]}```", inline=False)
     await interaction.followup.send(embed=e, view=WelcomePreview(interaction.user.id, tpl), ephemeral=True)
 
 
@@ -6379,10 +6981,16 @@ async def bienvenue_generer(interaction: discord.Interaction, ton: app_commands.
 async def bienvenue_tester(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
     text = await build_welcome(interaction.user)
-    await interaction.followup.send(embed=emb("👋 Aperçu de l'accueil", text, COLOR_PINK), ephemeral=True)
+    await interaction.followup.send(
+        embed=emb("👋 Aperçu de l'accueil", airy(["_Voilà ce que verra un nouvel arrivant :_", quote_block(text)]), COLOR_PINK),
+        ephemeral=True,
+    )
 
 
 bot.tree.add_command(bienvenue_group)
+bot.tree.add_command(autorole_group)
+bot.tree.add_command(interdit_group)
+bot.tree.add_command(vocal_group)
 
 
 # =====================================================================
@@ -7755,6 +8363,7 @@ async def join_log(member: discord.Member):
 async def on_member_remove(member: discord.Member):
     if member.bot:
         return
+    spawn(rules_drop(member.guild.id, member.id))  # il est parti : on retire sa demande en attente
     e = discord.Embed(title="🚪 Départ", color=COLOR_DARK)
     e.set_thumbnail(url=member.display_avatar.url)
     e.add_field(name="Membre", value=f"{member} (`{member.id}`)", inline=True)
@@ -7795,6 +8404,7 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    spawn(voice_auto_leave(member.guild))  # Mika quitte le vocal si elle y reste seule
     if member.bot or before.channel == after.channel:
         return
     if before.channel is None:
@@ -7822,6 +8432,7 @@ FEATURES = [  # (clé, libellé, défaut, commandes concernées)
     ("f_meteo", "Météo", True, {"meteo"}),
     ("f_sondage", "Sondages", True, {"sondage"}),
     ("f_cc", "Commandes perso (/cc)", True, {"cc"}),
+    ("f_giveaway", "Giveaways", True, {GW_CMD}),
 ]
 _CMD_FEATURE = {c: k for k, _, _, cmds in FEATURES for c in cmds}
 
@@ -8525,9 +9136,9 @@ class KahootBuilder(_OwnerView):
         self.origin: Optional[discord.Interaction] = None
 
     def embed(self) -> discord.Embed:
-        lines = [f"`{i}.` {q['question'][:70]} — ✅ {q['bonne'][:30]} ({q['temps']}s)" for i, q in enumerate(self.questions, 1)]
-        body = "\n".join(lines) or "Aucune question pour l'instant : clique sur **Ajouter une question**."
-        return emb(f"🎯 Nouveau Kahoot — {self.kname}", f"{body}\n\n{len(self.questions)}/{KAHOOT_MAX_Q} question(s)", COLOR_PURPLE)
+        lines = [f"`{i}.`  {q['question'][:70]}\n└ ✅ {q['bonne'][:30]}  •  ⏱️ {q['temps']}s" for i, q in enumerate(self.questions, 1)]
+        body = fit_lines(lines, 3500) or "Aucune question pour l'instant : clique sur **Ajouter une question**."
+        return emb(f"🎯 Nouveau Kahoot — {self.kname}"[:256], airy([body, f"📝 **{len(self.questions)}/{KAHOOT_MAX_Q}** question(s)"]), COLOR_PURPLE)
 
     @discord.ui.button(label="Ajouter une question", emoji="➕", style=discord.ButtonStyle.primary)
     async def b_add(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8575,8 +9186,9 @@ async def kahoot_generate_flow(interaction: discord.Interaction, theme: str, n: 
         return await interaction.followup.send(fail_msg(e), ephemeral=True)
     kid = await kahoot_save(interaction.guild_id, interaction.user.id, title, questions)
     k = {"id": kid, "author_id": interaction.user.id, "title": title, "questions": questions}
-    preview = "\n".join(f"`{i}.` {q['question'][:80]}" for i, q in enumerate(questions[:15], 1))
-    e = emb(f"🤖 Kahoot #{kid} généré — {title}", f"{preview}\n\n{len(questions)} question(s) • thème : {theme[:60]} • niveau {diff}", COLOR_PINK)
+    qlines = [f"`{i}.`  {q['question'][:80]}" for i, q in enumerate(questions[:15], 1)]
+    head = f"📚 **{len(questions)}** question(s)  •  🎯 thème : **{theme[:60]}**  •  🔥 niveau **{diff}**"
+    e = emb(f"🤖 Kahoot #{kid} généré — {title}"[:256], airy([head, fit_lines(qlines, 3300)]), COLOR_PINK)
     await interaction.followup.send(embed=e, view=KahootReadyView(interaction.user.id, k), ephemeral=True)
 
 
@@ -8901,6 +9513,1117 @@ async def jeux(interaction: discord.Interaction, mise: app_commands.Range[int, 0
 
 
 # =====================================================================
+# 📜 /regle : règles du serveur à ACCEPTER pour rester (refus ou délai dépassé = expulsion)
+#   /regle serveur → admin : texte, salon, rôle donné à l'acceptation, délai, activation.
+#   /regle afficher → tout le monde : relire les règles.
+#   À l'arrivée, le bot poste les règles avec « J'accepte / Je refuse » (réservé au nouveau membre).
+#   Les demandes en attente sont en base : elles survivent à un redémarrage du bot.
+# =====================================================================
+RULES_DEFAULT_DELAY = 10   # minutes pour accepter avant l'expulsion
+RULES_TEXT_MAX = 3500
+
+
+async def rules_delay(gid: int) -> int:
+    d = await get_int(gid, "rules_delay")
+    return d if 1 <= d <= 1440 else RULES_DEFAULT_DELAY
+
+
+def rules_prompt_embed(guild: discord.Guild, text: str, deadline: int) -> discord.Embed:
+    e = discord.Embed(title=f"📜 Règles de {guild.name}"[:250], description=text[:RULES_TEXT_MAX], color=COLOR_PURPLE)
+    e.add_field(
+        name="⚠️ Obligatoire",
+        value=(
+            "Tu dois **accepter** ces règles pour rester sur le serveur.\n"
+            f"Si tu refuses, ou sans réponse avant <t:{deadline}:R>, tu seras expulsé(e)."
+        ),
+        inline=False,
+    )
+    e.set_footer(text=f"Seul(e) le nouveau membre peut répondre • {BOT_NAME} 🖤")
+    return e
+
+
+async def rules_claim(gid: int, uid: int) -> Optional[tuple[int, int]]:
+    """Retire la demande en attente de façon atomique. Renvoie (salon, message) si on l'a « prise », sinon None
+    (déjà traitée par un clic ou par la boucle : impossible de traiter deux fois la même personne)."""
+    rows = await db_all(
+        "SELECT channel_id, message_id FROM rules_pending WHERE guild_id=? AND user_id=?", (gid, uid)
+    )
+    if not rows:
+        return None
+    cur = await bot.db.execute("DELETE FROM rules_pending WHERE guild_id=? AND user_id=?", (gid, uid))
+    await bot.db.commit()
+    return (rows[0][0], rows[0][1]) if cur.rowcount == 1 else None
+
+
+async def rules_delete_prompt(channel_id: int, message_id: int):
+    if not message_id:
+        return
+    ch = bot.get_channel(channel_id)
+    if ch is None:
+        return
+    try:
+        await ch.get_partial_message(message_id).delete()
+    except discord.HTTPException:
+        pass
+
+
+async def delete_later(channel_id: int, message_id: int, delay: float = 8):
+    await asyncio.sleep(delay)
+    await rules_delete_prompt(channel_id, message_id)
+
+
+async def rules_drop(gid: int, uid: int):
+    """Le membre est parti : on oublie sa demande et on range le message."""
+    try:
+        claimed = await rules_claim(gid, uid)
+        if claimed:
+            await rules_delete_prompt(*claimed)
+    except Exception:  # noqa: BLE001
+        log.exception("rules_drop")
+
+
+async def rules_log(guild: discord.Guild, member: discord.abc.User, title: str, color: int, cat: str, detail: str = ""):
+    e = discord.Embed(title=title, color=color)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.add_field(name="Membre", value=f"{member.mention} (`{member.id}`)", inline=True)
+    if detail:
+        e.add_field(name="Détails", value=detail[:900], inline=False)
+    e.timestamp = discord.utils.utcnow()
+    await mod_log(guild, e, cat)
+
+
+async def rules_kick(guild: discord.Guild, member: discord.Member, why: str) -> tuple[bool, str]:
+    """Expulse un membre qui n'a pas accepté les règles. Renvoie (réussi, détail). Jamais un admin / le proprio."""
+    perms = member.guild_permissions
+    if member.id == guild.owner_id or perms.administrator or perms.manage_guild:
+        return False, "membre du staff : non expulsé"
+    me = guild.me
+    if me is None or not me.guild_permissions.kick_members:
+        return False, "il me manque la permission « Expulser des membres »"
+    if member.top_role >= me.top_role:
+        return False, "son rôle est au-dessus du mien (hiérarchie)"
+    try:
+        await member.send(
+            f"📜 Tu n'as pas accepté les règles de **{guild.name}** ({why}), donc tu ne peux pas rester. "
+            "Tu peux revenir quand tu veux et les accepter 🖤"
+        )
+    except discord.HTTPException:
+        pass  # MP fermés
+    try:
+        await member.kick(reason=f"Règles non acceptées ({why})")
+    except discord.HTTPException as e:
+        log.warning("Expulsion (règles) impossible : %s", e)
+        return False, "Discord a refusé l'expulsion"
+    return True, "expulsé(e)"
+
+
+async def rules_on_join(member: discord.Member):
+    gid = member.guild.id
+    try:
+        if member.bot or not await get_flag(gid, "rules_on", False):
+            return
+        text = (await get_setting(gid, "rules_text", "")).strip()
+        ch = member.guild.get_channel(await get_int(gid, "rules_channel"))
+        if not text or ch is None:
+            log.warning("Règles activées mais texte ou salon manquant sur %s : personne n'est sanctionné", gid)
+            return
+        p = ch.permissions_for(member.guild.me)
+        if not (p.send_messages and p.embed_links):
+            log.warning("Règles : je ne peux pas écrire dans #%s (%s)", ch.name, gid)
+            return
+        deadline = int(time.time()) + await rules_delay(gid) * 60
+        await db_run(
+            "INSERT OR REPLACE INTO rules_pending(guild_id, user_id, deadline, channel_id, message_id) VALUES (?,?,?,?,0)",
+            (gid, member.id, deadline, ch.id),
+        )
+        view = discord.ui.View(timeout=None)
+        view.add_item(RulesButton("ok", gid, member.id))
+        view.add_item(RulesButton("no", gid, member.id))
+        try:
+            msg = await ch.send(
+                content=member.mention, embed=rules_prompt_embed(member.guild, text, deadline), view=view,
+                allowed_mentions=discord.AllowedMentions(users=[member], roles=False, everyone=False),
+            )
+        except discord.HTTPException as e:
+            # impossible de lui montrer les règles : on ne le punit pas pour ça
+            await db_run("DELETE FROM rules_pending WHERE guild_id=? AND user_id=?", (gid, member.id))
+            log.warning("Règles : envoi impossible (%s)", e)
+            return
+        await db_run("UPDATE rules_pending SET message_id=? WHERE guild_id=? AND user_id=?", (msg.id, gid, member.id))
+    except Exception:  # noqa: BLE001
+        log.exception("rules_on_join")
+
+
+class RulesButton(discord.ui.DynamicItem[discord.ui.Button], template=r"rl:(?P<act>ok|no):(?P<gid>[0-9]+):(?P<uid>[0-9]+)"):
+    def __init__(self, act: str, gid: int, uid: int):
+        ok = act == "ok"
+        super().__init__(discord.ui.Button(
+            label="J'accepte" if ok else "Je refuse", emoji="✅" if ok else "🚪",
+            style=discord.ButtonStyle.success if ok else discord.ButtonStyle.danger,
+            custom_id=f"rl:{act}:{gid}:{uid}",
+        ))
+        self.act, self.gid, self.uid = act, gid, uid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls(match["act"], int(match["gid"]), int(match["uid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.uid:
+            return await interaction.response.send_message("Ces règles ne sont pas pour toi 😏", ephemeral=True)
+        guild = interaction.guild
+        member = interaction.user if isinstance(interaction.user, discord.Member) else (guild.get_member(self.uid) if guild else None)
+        if guild is None or guild.id != self.gid or member is None:
+            return await interaction.response.send_message("😅 Je ne te trouve plus sur ce serveur.", ephemeral=True)
+        claimed = await rules_claim(self.gid, self.uid)
+        if claimed is None:
+            return await interaction.response.send_message("⌛ Cette demande n'est plus valable.", ephemeral=True)
+        cid = interaction.channel_id or claimed[0]
+        mid = interaction.message.id if interaction.message else claimed[1]
+        if self.act == "ok":
+            role_txt = None
+            rid = await get_int(self.gid, "rules_role")
+            role = guild.get_role(rid) if rid else None
+            if role is not None:
+                try:
+                    await member.add_roles(role, reason="Règles acceptées")
+                    role_txt = role.mention
+                except discord.HTTPException as e:
+                    log.warning("Règles : rôle non donné (%s)", e)
+            await interaction.response.edit_message(
+                content=None, embed=emb("✅ Règles acceptées", f"Merci {member.mention}, bienvenue ! 🖤", COLOR_PINK), view=None
+            )
+            spawn(delete_later(cid, mid))
+            spawn(rules_log(guild, member, "✅ Règles acceptées", COLOR_PINK, "arrivees",
+                            f"Rôle donné : {role_txt}" if role_txt else ""))
+        else:
+            await interaction.response.edit_message(
+                content=None,
+                embed=emb("🚪 Règles refusées", "Tu ne peux pas rester sans les accepter. À bientôt, peut-être 🖤", COLOR_DARK),
+                view=None,
+            )
+            spawn(delete_later(cid, mid))
+            ok, detail = await rules_kick(guild, member, "règles refusées")
+            await rules_log(guild, member, "👢 Sanction — Règles refusées", 0xFF7A7A, "sanctions", detail)
+
+
+@tasks.loop(seconds=30)
+async def rules_loop():
+    """Expulse ceux qui n'ont pas répondu à temps."""
+    try:
+        rows = await db_all("SELECT guild_id, user_id FROM rules_pending WHERE deadline<=?", (int(time.time()),))
+    except Exception:  # noqa: BLE001
+        log.exception("rules_loop : lecture impossible")
+        return
+    for gid, uid in rows:
+        try:
+            claimed = await rules_claim(gid, uid)
+            if claimed is None:
+                continue
+            await rules_delete_prompt(*claimed)
+            guild = bot.get_guild(gid)
+            member = guild.get_member(uid) if guild else None
+            if member is None or not await get_flag(gid, "rules_on", False):
+                continue  # parti entre-temps, ou système coupé : rien à faire
+            ok, detail = await rules_kick(guild, member, "délai dépassé")
+            await rules_log(guild, member, "👢 Sanction — Règles non acceptées (délai dépassé)", 0xFF7A7A, "sanctions", detail)
+        except Exception:  # noqa: BLE001
+            log.exception("rules_loop : traitement de %s/%s impossible", gid, uid)
+
+
+@rules_loop.before_loop
+async def _before_rules_loop():
+    await bot.wait_until_ready()
+
+
+async def rules_set_enabled(guild: discord.Guild, on: bool) -> Optional[str]:
+    """Active / coupe le système. Renvoie un message d'erreur si les prérequis manquent."""
+    gid = guild.id
+    if on:
+        if not (await get_setting(gid, "rules_text", "")).strip():
+            return "Écris d'abord les règles (`/regle serveur texte:True`)."
+        if guild.get_channel(await get_int(gid, "rules_channel")) is None:
+            return "Choisis d'abord un salon avec `/regle serveur salon:#règles`."
+        if not guild.me.guild_permissions.kick_members:
+            return "Il me faut la permission « Expulser des membres » pour faire respecter les règles."
+    await set_flag(gid, "rules_on", on)
+    return None
+
+
+async def rules_state_embed(guild: discord.Guild) -> discord.Embed:
+    gid = guild.id
+    on = await get_flag(gid, "rules_on", False)
+    cid, rid = await get_int(gid, "rules_channel"), await get_int(gid, "rules_role")
+    text = (await get_setting(gid, "rules_text", "")).strip()
+    pending = (await db_all("SELECT COUNT(*) FROM rules_pending WHERE guild_id=?", (gid,)))[0][0]
+    e = emb("📜 Règles du serveur", None, COLOR_PINK)
+    e.add_field(name="État", value="🟢 Obligatoires (expulsion sinon)" if on else "🔴 Désactivées", inline=True)
+    e.add_field(name="Salon", value=f"<#{cid}>" if cid else "— (à définir)", inline=True)
+    e.add_field(name="Rôle donné", value=f"<@&{rid}>" if rid else "Aucun", inline=True)
+    e.add_field(name="Délai pour accepter", value=f"{await rules_delay(gid)} min", inline=True)
+    e.add_field(
+        name="Permission « Expulser »",
+        value="✅ OK" if guild.me.guild_permissions.kick_members else "❌ Manquante", inline=True,
+    )
+    e.add_field(name="En attente", value=str(pending), inline=True)
+    e.add_field(
+        name="Aperçu du texte",
+        value=(quote_block(text[:700])[:1000] + ("\n…" if len(text) > 700 else "")) if text else "_Pas encore de règles._",
+        inline=False,
+    )
+    return e
+
+
+class RulesTextModal(SafeModal):
+    def __init__(self, enable: Optional[bool], current: str):
+        super().__init__(title="📜 Règles du serveur", timeout=900)
+        self.enable = enable
+        self.texte = discord.ui.TextInput(
+            label="Les règles à accepter", style=discord.TextStyle.paragraph, max_length=RULES_TEXT_MAX,
+            default=current[:RULES_TEXT_MAX] or None,
+            placeholder="1. Respect de tous\n2. Pas de pub\n3. …",
+        )
+        self.add_item(self.texte)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.texte.value.strip()
+        if len(text) < 10:
+            return await interaction.response.send_message("📜 Trop court : écris de vraies règles 😏", ephemeral=True)
+        await set_setting(interaction.guild_id, "rules_text", text)
+        err = None
+        if self.enable is not None:
+            err = await rules_set_enabled(interaction.guild, self.enable)
+        await interaction.response.send_message(
+            content="✅ Règles enregistrées." + (f"\n⚠️ {err}" if err else ""),
+            embed=await rules_state_embed(interaction.guild), ephemeral=True,
+        )
+
+
+regle_group = app_commands.Group(name="regle", description="Règles du serveur (à accepter pour rester) 📜", guild_only=True)
+
+
+@regle_group.command(name="serveur", description="(admin) Règles obligatoires : sans acceptation, on ne reste pas 📜")
+@app_commands.describe(
+    actif="Activer / couper l'obligation d'accepter les règles",
+    salon="Salon où les nouveaux voient les règles (visible par les nouveaux membres !)",
+    role="Rôle donné quand les règles sont acceptées (optionnel)",
+    sans_role="Retirer le rôle donné à l'acceptation",
+    delai="Minutes pour accepter avant l'expulsion (défaut 10)",
+    texte="Écrire / modifier le texte des règles (s'ouvre automatiquement s'il n'y en a pas)",
+)
+@admin_only
+async def regle_serveur(
+    interaction: discord.Interaction, actif: Optional[bool] = None, salon: Optional[discord.TextChannel] = None,
+    role: Optional[discord.Role] = None, sans_role: bool = False,
+    delai: Optional[app_commands.Range[int, 1, 1440]] = None, texte: bool = False,
+):
+    guild, gid = interaction.guild, interaction.guild_id
+    if salon is not None:
+        p = salon.permissions_for(guild.me)
+        if not (p.view_channel and p.send_messages and p.embed_links):
+            return await interaction.response.send_message(
+                f"🚫 Il me manque « Envoyer des messages » et « Intégrer des liens » dans {salon.mention}.", ephemeral=True
+            )
+    if role is not None:
+        problem = role_problem(role, guild)
+        if problem:
+            return await interaction.response.send_message(f"🚫 {problem}", ephemeral=True)
+    if salon is not None:
+        await set_setting(gid, "rules_channel", str(salon.id))
+    if sans_role:
+        await set_setting(gid, "rules_role", "0")
+    elif role is not None:
+        await set_setting(gid, "rules_role", str(role.id))
+    if delai is not None:
+        await set_setting(gid, "rules_delay", str(delai))
+    current = (await get_setting(gid, "rules_text", "")).strip()
+    if texte or (not current and actif is not False):  # pas de règles encore : on ouvre la fenêtre d'écriture
+        return await interaction.response.send_modal(RulesTextModal(actif, current))
+    err = await rules_set_enabled(guild, actif) if actif is not None else None
+    await interaction.response.send_message(
+        content=f"⚠️ {err}" if err else None, embed=await rules_state_embed(guild), ephemeral=True
+    )
+
+
+@regle_group.command(name="afficher", description="Relis les règles du serveur 📜")
+@app_commands.describe(public="Les afficher pour tout le monde dans le salon")
+async def regle_afficher(interaction: discord.Interaction, public: bool = False):
+    text = (await get_setting(interaction.guild_id, "rules_text", "")).strip()
+    if not text:
+        return await interaction.response.send_message("📜 Aucune règle n'a encore été définie sur ce serveur.", ephemeral=True)
+    e = discord.Embed(title=f"📜 Règles de {interaction.guild.name}"[:250], description=text[:4000], color=COLOR_PURPLE)
+    e.set_footer(text=f"{BOT_NAME} 🖤")
+    await interaction.response.send_message(embed=e, ephemeral=not public)
+
+
+bot.tree.add_command(regle_group)
+
+
+# =====================================================================
+# 🎉 /givawayyy : giveaways à bouton (participation persistante, tirage automatique, relance possible)
+#   lancer • terminer • relancer • annuler • liste   (permission « Gérer le serveur »)
+#   Le nom de la commande se change avec la constante GW_CMD en haut du fichier.
+# =====================================================================
+GW_MAX_OPEN = 20       # giveaways ouverts en même temps par serveur
+GW_MAX_WINNERS = 20
+
+
+async def gw_get(gwid: int) -> Optional[dict]:
+    rows = await db_all(
+        "SELECT id, guild_id, channel_id, message_id, host_id, prize, winners, role_id, ends_at, status, winner_ids "
+        "FROM giveaways WHERE id=?", (gwid,),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "id": r[0], "guild_id": r[1], "channel_id": r[2], "message_id": r[3], "host_id": r[4], "prize": r[5],
+        "winners": r[6], "role_id": r[7], "ends_at": r[8], "status": r[9],
+        "winner_ids": [int(x) for x in r[10].split(",") if x.strip().isdigit()],
+    }
+
+
+async def gw_count(gwid: int) -> int:
+    return (await db_all("SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id=?", (gwid,)))[0][0]
+
+
+def gw_embed(g: dict, count: int) -> discord.Embed:
+    st = g["status"]
+    plural = "s" if g["winners"] > 1 else ""
+    if st == "open":
+        lines = [
+            "Clique sur **🎉 Participer** pour tenter ta chance ! _(re-clique pour te retirer)_",
+            f"⏳ Fin : <t:{g['ends_at']}:R> (<t:{g['ends_at']}:f>)",
+            f"👑 Organisé par : <@{g['host_id']}>",
+            f"🏆 Gagnant{plural} : **{g['winners']}**",
+        ]
+        if g["role_id"]:
+            lines.append(f"🎭 Rôle requis : <@&{g['role_id']}>")
+        color = COLOR_PINK
+    elif st == "ended":
+        won = ", ".join(f"<@{u}>" for u in g["winner_ids"])
+        lines = [
+            "🔒 **Giveaway terminé**",
+            f"🏆 Gagnant{'s' if len(g['winner_ids']) > 1 else ''} : {won}" if won else "😅 Personne n'a pu gagner.",
+            f"👑 Organisé par : <@{g['host_id']}>",
+        ]
+        color = COLOR_DARK
+    else:
+        lines = ["🚫 **Giveaway annulé**", f"👑 Organisé par : <@{g['host_id']}>"]
+        color = COLOR_DARK
+    e = discord.Embed(title=f"🎉 {g['prize']}"[:250], description="\n\n".join(lines), color=color)
+    e.set_footer(text=f"Giveaway #{g['id']} • {count} participant{'s' if count > 1 else ''} • {BOT_NAME} 🖤")
+    return e
+
+
+class GiveawayJoin(discord.ui.DynamicItem[discord.ui.Button], template=r"gw:join:(?P<gwid>[0-9]+)"):
+    def __init__(self, gwid: int):
+        super().__init__(discord.ui.Button(
+            label="Participer", emoji="🎉", style=discord.ButtonStyle.success, custom_id=f"gw:join:{gwid}",
+        ))
+        self.gwid = gwid
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match, /):
+        return cls(int(match["gwid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        g = await gw_get(self.gwid)
+        if g is None or g["status"] != "open" or g["ends_at"] <= time.time():
+            return await interaction.response.send_message("🔒 Ce giveaway est terminé.", ephemeral=True)
+        user = interaction.user
+        if g["role_id"] and not (isinstance(user, discord.Member) and any(r.id == g["role_id"] for r in user.roles)):
+            return await interaction.response.send_message(
+                f"🎭 Il te faut le rôle <@&{g['role_id']}> pour participer.", ephemeral=True, allowed_mentions=NO_PINGS
+            )
+        have = await db_all("SELECT 1 FROM giveaway_entries WHERE giveaway_id=? AND user_id=?", (self.gwid, user.id))
+        if have:  # re-cliquer retire sa participation
+            await bot.db.execute("DELETE FROM giveaway_entries WHERE giveaway_id=? AND user_id=?", (self.gwid, user.id))
+        else:
+            await bot.db.execute("INSERT OR IGNORE INTO giveaway_entries(giveaway_id, user_id) VALUES (?,?)", (self.gwid, user.id))
+        await bot.db.commit()
+        await interaction.response.edit_message(embed=gw_embed(g, await gw_count(self.gwid)))
+        await interaction.followup.send(
+            "➖ Participation retirée." if have else "✅ Tu participes ! Bonne chance 🍀", ephemeral=True
+        )
+
+
+def gw_view(gwid: int) -> discord.ui.View:
+    v = discord.ui.View(timeout=None)
+    v.add_item(GiveawayJoin(gwid))
+    return v
+
+
+async def gw_channel(cid: int):
+    ch = bot.get_channel(cid)
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(cid)
+        except discord.HTTPException:
+            return None
+    return ch
+
+
+async def gw_pick(g: dict, n: int, exclude=()) -> list[int]:
+    """Tire jusqu'à n gagnants parmi les participants encore présents (et ayant le rôle requis, s'il y en a un)."""
+    guild = bot.get_guild(g["guild_id"])
+    if guild is None:
+        return []
+    ids = [r[0] for r in await db_all("SELECT user_id FROM giveaway_entries WHERE giveaway_id=?", (g["id"],))
+           if r[0] not in exclude]
+    random.shuffle(ids)
+    out: list[int] = []
+    for uid in ids:
+        if len(out) >= n:
+            break
+        m = guild.get_member(uid)
+        if m is None:
+            try:
+                m = await guild.fetch_member(uid)
+            except discord.HTTPException:
+                continue  # il a quitté le serveur
+        if m.bot or (g["role_id"] and all(r.id != g["role_id"] for r in m.roles)):
+            continue
+        out.append(uid)
+    return out
+
+
+async def gw_announce(g: dict, ch, winners: list[int], reroll: bool = False):
+    if winners:
+        who = ", ".join(f"<@{u}>" for u in winners)
+        verb = "Tu remportes" if len(winners) == 1 else "Vous remportez"
+        text = f"{'🔁 Nouveau tirage : ' if reroll else '🎉 '}Félicitations {who} ! {verb} **{g['prize']}** 🖤"
+    else:
+        text = f"😅 Personne n'est éligible pour **{g['prize']}**…"
+    mentions = discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False)
+    try:
+        await ch.get_partial_message(g["message_id"]).reply(text[:2000], allowed_mentions=mentions, mention_author=False)
+    except discord.HTTPException:  # message d'origine supprimé : on poste simplement dans le salon
+        try:
+            await ch.send(text[:2000], allowed_mentions=mentions)
+        except discord.HTTPException:
+            pass
+
+
+async def gw_refresh_message(g: dict, view=None):
+    ch = await gw_channel(g["channel_id"])
+    if ch is None:
+        return None
+    try:
+        await ch.get_partial_message(g["message_id"]).edit(embed=gw_embed(g, await gw_count(g["id"])), view=view)
+    except discord.HTTPException:
+        pass
+    return ch
+
+
+async def gw_finish(gwid: int) -> Optional[list[int]]:
+    """Termine un giveaway : tirage, mise à jour du message et annonce. None s'il était déjà terminé / introuvable."""
+    cur = await bot.db.execute("UPDATE giveaways SET status='ended' WHERE id=? AND status='open'", (gwid,))
+    await bot.db.commit()
+    if cur.rowcount != 1:  # déjà pris en charge (clic « terminer » + boucle en même temps)
+        return None
+    g = await gw_get(gwid)
+    winners = await gw_pick(g, g["winners"])
+    await db_run("UPDATE giveaways SET winner_ids=? WHERE id=?", (",".join(map(str, winners)), gwid))
+    g["winner_ids"] = winners
+    ch = await gw_refresh_message(g)
+    if ch is not None:
+        await gw_announce(g, ch, winners)
+    guild = bot.get_guild(g["guild_id"])
+    if guild is not None:
+        le = discord.Embed(title="🎉 Giveaway terminé", color=COLOR_PINK)
+        le.add_field(name="Lot", value=g["prize"][:200], inline=True)
+        le.add_field(name="Giveaway", value=f"#{gwid}", inline=True)
+        le.add_field(name="Gagnants", value=", ".join(f"<@{u}>" for u in winners) or "Personne", inline=False)
+        le.timestamp = discord.utils.utcnow()
+        await mod_log(guild, le, "admin")
+    return winners
+
+
+@tasks.loop(seconds=20)
+async def giveaway_loop():
+    try:
+        rows = await db_all("SELECT id FROM giveaways WHERE status='open' AND ends_at<=?", (int(time.time()),))
+    except Exception:  # noqa: BLE001
+        log.exception("giveaway_loop : lecture impossible")
+        return
+    for (gwid,) in rows:
+        try:
+            await gw_finish(gwid)
+        except Exception:  # noqa: BLE001
+            log.exception("giveaway_loop : fin du giveaway %s impossible", gwid)
+
+
+@giveaway_loop.before_loop
+async def _before_giveaway_loop():
+    await bot.wait_until_ready()
+
+
+def gw_autocomplete(status: str):
+    async def ac(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+        if not interaction.guild_id:
+            return []
+        rows = await db_all(
+            "SELECT id, prize FROM giveaways WHERE guild_id=? AND status=? ORDER BY id DESC LIMIT 50",
+            (interaction.guild_id, status),
+        )
+        cur = current.lower().strip().lstrip("#")
+        return [
+            app_commands.Choice(name=f"#{i} · {p}"[:100], value=i)
+            for i, p in rows if not cur or cur in str(i) or cur in p.lower()
+        ][:25]
+    return ac
+
+
+giveaway_group = app_commands.Group(
+    name=GW_CMD, description="(staff) Giveaways 🎉", guild_only=True,
+    default_permissions=discord.Permissions(manage_guild=True),
+)
+
+
+async def gw_load(interaction: discord.Interaction, gwid: int, want: str) -> Optional[dict]:
+    """Charge un giveaway du serveur dans l'état voulu ; sinon répond une erreur et renvoie None."""
+    g = await gw_get(gwid)
+    if g is None or g["guild_id"] != interaction.guild_id:
+        await interaction.response.send_message("🎉 Giveaway introuvable (choisis dans la liste).", ephemeral=True)
+        return None
+    if g["status"] != want:
+        etat = {"open": "ouvert", "ended": "terminé", "cancelled": "annulé"}[g["status"]]
+        need = {"open": "encore ouvert", "ended": "terminé"}[want]
+        await interaction.response.send_message(f"🎉 Le giveaway #{gwid} est {etat} : il doit être {need}.", ephemeral=True)
+        return None
+    return g
+
+
+@giveaway_group.command(name="lancer", description="Lance un giveaway avec un bouton Participer 🎉")
+@app_commands.describe(
+    lot="Ce qui est à gagner", duree="Durée : 30m, 2h, 1j… (max 28 jours)",
+    gagnants=f"Nombre de gagnants (1 à {GW_MAX_WINNERS}, défaut 1)", salon="Salon où publier (ici par défaut)",
+    role_requis="Rôle obligatoire pour participer (optionnel)",
+)
+@staff_only
+async def gw_lancer(
+    interaction: discord.Interaction, lot: app_commands.Range[str, 1, 200], duree: str,
+    gagnants: app_commands.Range[int, 1, GW_MAX_WINNERS] = 1, salon: Optional[discord.TextChannel] = None,
+    role_requis: Optional[discord.Role] = None,
+):
+    minutes = parse_minutes(duree)
+    if minutes is None:
+        return await interaction.response.send_message("⏱️ Durée invalide : `30m`, `2h`, `1j` (max 28 jours).", ephemeral=True)
+    channel = salon or interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        return await interaction.response.send_message("🎉 Choisis un salon textuel.", ephemeral=True)
+    p = channel.permissions_for(interaction.guild.me)
+    if not (p.send_messages and p.embed_links):
+        return await interaction.response.send_message(
+            f"🚫 Il me manque « Envoyer des messages » et « Intégrer des liens » dans {channel.mention}.", ephemeral=True
+        )
+    n_open = (await db_all("SELECT COUNT(*) FROM giveaways WHERE guild_id=? AND status='open'", (interaction.guild_id,)))[0][0]
+    if n_open >= GW_MAX_OPEN:
+        return await interaction.response.send_message(
+            f"🎉 Déjà {GW_MAX_OPEN} giveaways en cours : termine ou annule-en un d'abord.", ephemeral=True
+        )
+    role_id = role_requis.id if role_requis is not None and not role_requis.is_default() else 0
+    await interaction.response.defer(ephemeral=True)
+    cur = await bot.db.execute(
+        "INSERT INTO giveaways(guild_id, channel_id, host_id, prize, winners, role_id, ends_at) VALUES (?,?,?,?,?,?,?)",
+        (interaction.guild_id, channel.id, interaction.user.id, lot.strip(), gagnants, role_id,
+         int(time.time()) + minutes * 60),
+    )
+    await bot.db.commit()
+    gwid = cur.lastrowid
+    g = await gw_get(gwid)
+    try:
+        msg = await channel.send(embed=gw_embed(g, 0), view=gw_view(gwid), allowed_mentions=NO_PINGS)
+    except discord.HTTPException:
+        await db_run("DELETE FROM giveaways WHERE id=?", (gwid,))
+        return await interaction.followup.send(f"🚫 Je n'ai pas pu publier dans {channel.mention}.", ephemeral=True)
+    await db_run("UPDATE giveaways SET message_id=? WHERE id=?", (msg.id, gwid))
+    await interaction.followup.send(f"✅ Giveaway **#{gwid}** lancé : {msg.jump_url}", ephemeral=True)
+
+
+@giveaway_group.command(name="terminer", description="Termine un giveaway maintenant et tire les gagnants 🏁")
+@app_commands.describe(giveaway="Le giveaway à terminer")
+@app_commands.autocomplete(giveaway=gw_autocomplete("open"))
+@staff_only
+async def gw_terminer(interaction: discord.Interaction, giveaway: int):
+    if await gw_load(interaction, giveaway, "open") is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    winners = await gw_finish(giveaway)
+    if winners is None:
+        return await interaction.followup.send("🎉 Il vient d'être terminé.", ephemeral=True)
+    await interaction.followup.send(
+        f"🏁 Giveaway #{giveaway} terminé : " + (", ".join(f"<@{u}>" for u in winners) or "personne d'éligible."),
+        ephemeral=True, allowed_mentions=NO_PINGS,
+    )
+
+
+@giveaway_group.command(name="relancer", description="Retire de nouveaux gagnants d'un giveaway terminé 🔁")
+@app_commands.describe(giveaway="Le giveaway terminé", nombre="Combien de nouveaux gagnants (défaut 1)")
+@app_commands.autocomplete(giveaway=gw_autocomplete("ended"))
+@staff_only
+async def gw_relancer(
+    interaction: discord.Interaction, giveaway: int, nombre: app_commands.Range[int, 1, GW_MAX_WINNERS] = 1
+):
+    g = await gw_load(interaction, giveaway, "ended")
+    if g is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    new = await gw_pick(g, nombre, exclude=set(g["winner_ids"]))
+    if not new:
+        return await interaction.followup.send("😅 Personne d'autre n'est éligible.", ephemeral=True)
+    g["winner_ids"] = g["winner_ids"] + new
+    await db_run("UPDATE giveaways SET winner_ids=? WHERE id=?", (",".join(map(str, g["winner_ids"])), giveaway))
+    ch = await gw_refresh_message(g)
+    if ch is not None:
+        await gw_announce(g, ch, new, reroll=True)
+    await interaction.followup.send(
+        "🔁 Nouveaux gagnants : " + ", ".join(f"<@{u}>" for u in new), ephemeral=True, allowed_mentions=NO_PINGS
+    )
+
+
+@giveaway_group.command(name="annuler", description="Annule un giveaway sans tirer de gagnant 🚫")
+@app_commands.describe(giveaway="Le giveaway à annuler")
+@app_commands.autocomplete(giveaway=gw_autocomplete("open"))
+@staff_only
+async def gw_annuler(interaction: discord.Interaction, giveaway: int):
+    if await gw_load(interaction, giveaway, "open") is None:
+        return
+    cur = await bot.db.execute("UPDATE giveaways SET status='cancelled' WHERE id=? AND status='open'", (giveaway,))
+    await bot.db.commit()
+    if cur.rowcount != 1:
+        return await interaction.response.send_message("🎉 Il vient d'être terminé.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    await gw_refresh_message(await gw_get(giveaway))
+    await interaction.followup.send(f"🚫 Giveaway #{giveaway} annulé.", ephemeral=True)
+
+
+@giveaway_group.command(name="liste", description="Les giveaways en cours sur le serveur 📋")
+@staff_only
+async def gw_liste(interaction: discord.Interaction):
+    rows = await db_all(
+        "SELECT id, channel_id, prize, ends_at, winners, "
+        "(SELECT COUNT(*) FROM giveaway_entries e WHERE e.giveaway_id=giveaways.id) "
+        "FROM giveaways WHERE guild_id=? AND status='open' ORDER BY ends_at",
+        (interaction.guild_id,),
+    )
+    if not rows:
+        return await interaction.response.send_message(f"🎉 Aucun giveaway en cours. Lance-en un avec `/{GW_CMD} lancer`.", ephemeral=True)
+    lines = [
+        f"`#{i}` **{p[:60]}** — <#{c}> • fin <t:{t}:R> • 🏆 {w} • 👥 {n}"
+        for i, c, p, t, w, n in rows
+    ]
+    await interaction.response.send_message(
+        embed=emb(f"🎉 Giveaways en cours ({len(rows)})", "\n".join(lines)[:4000], COLOR_PINK), ephemeral=True
+    )
+
+
+bot.tree.add_command(giveaway_group)
+
+# =====================================================================
+# 🔗 /lien  +  🎵 /musique : musique en vocal réservée aux rôles choisis par un admin
+#   À COLLER dans bot.py tout en bas, juste AVANT la ligne  if __name__ == "__main__":
+#   (il doit venir après tout le reste : il utilise des éléments définis plus haut dans le fichier).
+#   Prérequis (pip) : yt-dlp  (en plus de PyNaCl, davey et imageio-ffmpeg déjà utilisés par /vocal)
+#   Rien d'autre à modifier : ce bloc s'enregistre tout seul (liste des commandes, interrupteur
+#   « Musique » dans /adminpanel, /test).
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 🔗 /lien
+# ---------------------------------------------------------------------
+music_staff = app_commands.checks.has_permissions(manage_guild=True)
+BOT_LINK = os.getenv("BOT_LINK", "https://github.com/MrMisteur/Bot-AI-Discord-Mika")
+
+
+@bot.tree.command(name="lien", description="Le lien du projet du bot 🔗")
+async def lien(interaction: discord.Interaction):
+    e = emb("🔗 Mon projet", f"Mon code source est ici :\n{BOT_LINK}", COLOR_PINK)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Ouvrir sur GitHub", emoji="🐙", style=discord.ButtonStyle.link, url=BOT_LINK))
+    await interaction.response.send_message(embed=e, view=view)
+
+
+# ---------------------------------------------------------------------
+# 🎵 /musique
+# ---------------------------------------------------------------------
+MUSIC_MAX_MIN = int(os.getenv("MUSIC_MAX_MIN", "60"))   # durée max d'un titre, en minutes
+MUSIC_MAX_QUEUE = 25
+MUSIC_MAX_ROLES = 25
+MUSIC_HOSTS = ("youtube.com", "youtu.be", "soundcloud.com", "bandcamp.com")  # liens acceptés (sinon : recherche)
+FFMPEG_STREAM = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", "options": "-vn"}
+
+
+class MusicState:
+    def __init__(self):
+        self.queue: deque = deque()
+        self.current: Optional[dict] = None
+        self.volume = 0.5
+        self.channel = None                 # salon texte où annoncer les titres
+        self.lock = asyncio.Lock()
+
+
+music_states: dict[int, MusicState] = {}
+
+
+def music_missing() -> Optional[str]:
+    missing = []
+    if ffmpeg_path() is None:
+        missing.append("ffmpeg (ajoute `imageio-ffmpeg` au requirements.txt)")
+    try:
+        import nacl  # noqa: F401
+    except ImportError:
+        missing.append("PyNaCl")
+    try:
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        missing.append("yt-dlp")
+    return ", ".join(missing) or None
+
+
+def _ytdl_extract(query: str) -> Optional[dict]:
+    import yt_dlp
+    opts = {
+        "format": "bestaudio/best", "quiet": True, "no_warnings": True, "noplaylist": True,
+        "default_search": "ytsearch", "source_address": "0.0.0.0", "socket_timeout": 15,
+    }
+    with yt_dlp.YoutubeDL(opts) as y:
+        info = y.extract_info(query, download=False)
+    if info and info.get("entries"):
+        entries = [x for x in info["entries"] if x]
+        info = entries[0] if entries else None
+    return info
+
+
+def music_query(raw: str) -> Optional[str]:
+    """Lien accepté tel quel (hôtes autorisés) ou texte de recherche. None = lien refusé."""
+    raw = raw.strip()
+    if raw.lower().startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        host = (urlparse(raw).hostname or "").lower()
+        return raw if any(host == h or host.endswith("." + h) for h in MUSIC_HOSTS) else None
+    return f"ytsearch1:{raw}"
+
+
+def fmt_dur(sec) -> str:
+    if not sec:
+        return "?"
+    m, s = divmod(int(sec), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+# ---------- Rôles autorisés ----------
+async def music_role_ids(gid: int) -> set[int]:
+    raw = await get_setting(gid, "music_roles", "")
+    return {int(x) for x in raw.split(",") if x.strip().isdigit()}
+
+
+async def _save_music_roles(gid: int, ids: set[int]):
+    await set_setting(gid, "music_roles", ",".join(str(i) for i in sorted(ids)))
+
+
+async def music_check(interaction: discord.Interaction) -> bool:
+    """Staff (Gérer le serveur) ou membre ayant un des rôles autorisés. Sinon : refus avec explication."""
+    m = interaction.user
+    roles = await music_role_ids(interaction.guild_id)
+    if isinstance(m, discord.Member):
+        p = m.guild_permissions
+        if p.administrator or p.manage_guild or any(r.id in roles for r in m.roles):
+            return True
+    if roles:
+        txt = "🚫 La musique est réservée aux rôles : " + ", ".join(f"<@&{r}>" for r in sorted(roles)) + "."
+    else:
+        txt = "🚫 La musique est réservée au staff : aucun rôle n'est autorisé pour l'instant (`/musique autoriser`)."
+    await interaction.response.send_message(txt, ephemeral=True, allowed_mentions=NO_PINGS)
+    return False
+
+
+async def music_control(interaction: discord.Interaction):
+    """Pour skip / pause / stop / volume : renvoie (vc, état) ou None après avoir répondu l'erreur."""
+    if not await music_check(interaction):
+        return None
+    vc, st = interaction.guild.voice_client, music_states.get(interaction.guild_id)
+    if vc is None or not vc.is_connected() or st is None or (st.current is None and not st.queue):
+        await interaction.response.send_message("Je ne joue rien pour le moment 😏", ephemeral=True)
+        return None
+    voice = interaction.user.voice
+    if (voice is None or voice.channel is None or voice.channel.id != vc.channel.id) \
+            and not interaction.permissions.manage_guild:
+        await interaction.response.send_message(f"Viens dans {vc.channel.mention} pour contrôler la musique 😏", ephemeral=True)
+        return None
+    return vc, st
+
+
+# ---------- Lecture ----------
+async def music_advance(guild: discord.Guild):
+    """Lance le titre suivant si rien ne joue. Appelée à la fin de chaque titre."""
+    st = music_states.get(guild.id)
+    if st is None:
+        return
+    async with st.lock:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            music_states.pop(guild.id, None)
+            return
+        if vc.is_playing() or vc.is_paused():
+            return
+        while st.queue:
+            track = st.queue.popleft()
+            try:
+                if time.time() - track["at"] > 600:  # le lien de streaming expire : on le renouvelle
+                    info = await asyncio.wait_for(asyncio.to_thread(_ytdl_extract, track["page"]), timeout=40)
+                    track["url"], track["at"] = info["url"], time.time()
+                src = discord.PCMVolumeTransformer(
+                    discord.FFmpegPCMAudio(track["url"], executable=ffmpeg_path() or "ffmpeg", **FFMPEG_STREAM),
+                    volume=st.volume,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Musique : lecture impossible (%r)", e)
+                await _music_say(st, f"😅 Impossible de lire **{track['title'][:80]}**, je passe au suivant.")
+                continue
+
+            def _after(err, g=guild):
+                if err:
+                    log.warning("Musique : erreur de lecture (%r)", err)
+                asyncio.run_coroutine_threadsafe(music_advance(g), bot.loop)
+
+            st.current = track
+            vc.play(src, after=_after)
+            e = emb("🎶 Je joue", f"**[{track['title'][:150]}]({track['page']})**\n⏱️ {fmt_dur(track['duration'])} • demandé par <@{track['by']}>", COLOR_PURPLE)
+            await _music_say(st, embed=e)
+            return
+        st.current = None
+
+
+async def _music_say(st: MusicState, text: Optional[str] = None, embed: Optional[discord.Embed] = None):
+    if st.channel is None:
+        return
+    try:
+        await st.channel.send(text, embed=embed, allowed_mentions=NO_PINGS)
+    except discord.HTTPException:
+        pass
+
+
+# ---------- Commandes ----------
+musique_group = app_commands.Group(name="musique", description="Musique en vocal 🎵", guild_only=True)
+
+
+@musique_group.command(name="jouer", description="Joue un titre (recherche ou lien YouTube / SoundCloud / Bandcamp) 🎶")
+@app_commands.describe(titre="Un titre à chercher, ou un lien")
+@app_commands.checks.cooldown(1, 3.0, key=lambda i: i.user.id)
+async def musique_jouer(interaction: discord.Interaction, titre: app_commands.Range[str, 2, 200]):
+    if not await music_check(interaction):
+        return
+    missing = music_missing()
+    if missing:
+        return await interaction.response.send_message(
+            f"🔧 Je ne peux pas jouer de musique : il manque sur l'hébergement **{missing}**.", ephemeral=True
+        )
+    guild, voice = interaction.guild, interaction.user.voice
+    if voice is None or voice.channel is None:
+        return await interaction.response.send_message("Rejoins d'abord un salon vocal, petit chat 😏", ephemeral=True)
+    ch = voice.channel
+    if await channel_banned(ch, guild.id):
+        return await interaction.response.send_message("🚫 Je n'ai pas le droit de venir dans ce vocal.", ephemeral=True)
+    query = music_query(titre)
+    if query is None:
+        return await interaction.response.send_message(
+            "🔗 Lien non accepté : YouTube, SoundCloud ou Bandcamp seulement (ou tape juste le titre).", ephemeral=True
+        )
+    st = music_states.get(guild.id)
+    if st is not None and len(st.queue) >= MUSIC_MAX_QUEUE:
+        return await interaction.response.send_message(f"🎵 La file est pleine ({MUSIC_MAX_QUEUE} titres max).", ephemeral=True)
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    vc = guild.voice_client
+    if vc is not None and not vc.is_connected():
+        music_states.pop(guild.id, None)
+        try:
+            await vc.disconnect(force=True)
+        except Exception:  # noqa: BLE001
+            pass
+        vc = None
+    try:
+        if vc is None:
+            perms = ch.permissions_for(guild.me)
+            if not (perms.connect and perms.speak):
+                return await interaction.followup.send(f"🚫 Il me faut « Se connecter » et « Parler » dans {ch.mention}.", ephemeral=True)
+            await ch.connect(timeout=20, self_deaf=True)
+        elif vc.channel.id != ch.id:
+            if vc.is_playing() or vc.is_paused():
+                return await interaction.followup.send(f"Je joue déjà dans {vc.channel.mention}, viens m'y rejoindre 😏", ephemeral=True)
+            await vc.move_to(ch)
+    except (asyncio.TimeoutError, discord.ClientException, discord.HTTPException) as e:
+        log.warning("Musique : connexion impossible (%r)", e)
+        return await interaction.followup.send("😅 Je n'arrive pas à me connecter au vocal, réessaie dans un instant.", ephemeral=True)
+
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_ytdl_extract, query), timeout=40)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Musique : recherche impossible (%r)", e)
+        return await interaction.followup.send("😅 Je n'ai pas réussi à récupérer ce titre (introuvable, privé ou bloqué).", ephemeral=True)
+    if not info or not info.get("url"):
+        return await interaction.followup.send("🤷 Je n'ai rien trouvé.", ephemeral=True)
+    if info.get("is_live") or (info.get("duration") or 0) > MUSIC_MAX_MIN * 60:
+        return await interaction.followup.send(f"⏱️ Pas de direct ni de titre de plus de {MUSIC_MAX_MIN} min.", ephemeral=True)
+
+    st = music_states.setdefault(guild.id, MusicState())
+    st.channel = interaction.channel
+    track = {
+        "title": info.get("title") or "Titre inconnu", "page": info.get("webpage_url") or titre,
+        "duration": info.get("duration"), "url": info["url"], "at": time.time(), "by": interaction.user.id,
+    }
+    st.queue.append(track)
+    busy = st.current is not None
+    await interaction.followup.send(
+        f"➕ **{track['title'][:100]}** ajouté" + (f" (position {len(st.queue)})." if busy else " : je lance ça."), ephemeral=True
+    )
+    await music_advance(guild)
+
+
+@musique_group.command(name="passer", description="Passe au titre suivant ⏭️")
+async def musique_passer(interaction: discord.Interaction):
+    ctl = await music_control(interaction)
+    if ctl is None:
+        return
+    vc, st = ctl
+    title = st.current["title"][:80] if st.current else "le titre"
+    vc.stop()  # la fin du titre déclenche automatiquement le suivant
+    await interaction.response.send_message(f"⏭️ **{title}** passé.", allowed_mentions=NO_PINGS)
+
+
+@musique_group.command(name="pause", description="Met la musique en pause ⏸️")
+async def musique_pause(interaction: discord.Interaction):
+    ctl = await music_control(interaction)
+    if ctl is None:
+        return
+    vc, _ = ctl
+    if not vc.is_playing():
+        return await interaction.response.send_message("Rien ne joue en ce moment 😏", ephemeral=True)
+    vc.pause()
+    await interaction.response.send_message("⏸️ Musique en pause. `/musique reprendre` pour continuer.")
+
+
+@musique_group.command(name="reprendre", description="Reprend la musique ▶️")
+async def musique_reprendre(interaction: discord.Interaction):
+    ctl = await music_control(interaction)
+    if ctl is None:
+        return
+    vc, _ = ctl
+    if not vc.is_paused():
+        return await interaction.response.send_message("La musique n'est pas en pause 😏", ephemeral=True)
+    vc.resume()
+    await interaction.response.send_message("▶️ C'est reparti.")
+
+
+@musique_group.command(name="stop", description="Arrête la musique et vide la file ⏹️")
+async def musique_stop(interaction: discord.Interaction):
+    ctl = await music_control(interaction)
+    if ctl is None:
+        return
+    vc, st = ctl
+    st.queue.clear()
+    vc.stop()
+    await interaction.response.send_message("⏹️ Musique arrêtée, file vidée. (`/vocal quitter` pour me renvoyer.)")
+
+
+@musique_group.command(name="volume", description="Règle le volume (1 à 100) 🔊")
+@app_commands.describe(niveau="Volume en pourcentage (50 par défaut)")
+async def musique_volume(interaction: discord.Interaction, niveau: app_commands.Range[int, 1, 100]):
+    ctl = await music_control(interaction)
+    if ctl is None:
+        return
+    vc, st = ctl
+    st.volume = niveau / 100
+    if isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = st.volume
+    await interaction.response.send_message(f"🔊 Volume : **{niveau}%**")
+
+
+@musique_group.command(name="file", description="Voir le titre en cours et la file d'attente 📜")
+async def musique_file(interaction: discord.Interaction):
+    st = music_states.get(interaction.guild_id)
+    if st is None or (st.current is None and not st.queue):
+        return await interaction.response.send_message("La file est vide. `/musique jouer` 😏", ephemeral=True)
+    lines = []
+    if st.current:
+        lines.append(f"🎶 **En cours :** [{st.current['title'][:80]}]({st.current['page']}) • {fmt_dur(st.current['duration'])}")
+    for i, t in enumerate(list(st.queue)[:10], 1):
+        lines.append(f"`{i}.` {t['title'][:70]} • {fmt_dur(t['duration'])} • <@{t['by']}>")
+    if len(st.queue) > 10:
+        lines.append(f"_… et {len(st.queue) - 10} autre(s)_")
+    await interaction.response.send_message(
+        embed=emb("📜 File d'attente", "\n".join(lines)[:4000], COLOR_PURPLE), allowed_mentions=NO_PINGS
+    )
+
+
+# ---------- Gestion des rôles autorisés (staff : Gérer le serveur) ----------
+@musique_group.command(name="autoriser", description="(staff) Autorise un rôle à utiliser la musique 🎀")
+@app_commands.describe(role="Le rôle autorisé (il peut jouer, passer, mettre en pause…)")
+@music_staff
+async def musique_autoriser(interaction: discord.Interaction, role: discord.Role):
+    gid = interaction.guild_id
+    ids = await music_role_ids(gid)
+    if role.id in ids:
+        return await interaction.response.send_message(f"😏 {role.mention} est déjà autorisé.", ephemeral=True, allowed_mentions=NO_PINGS)
+    if len(ids) >= MUSIC_MAX_ROLES:
+        return await interaction.response.send_message(f"🚫 {MUSIC_MAX_ROLES} rôles maximum.", ephemeral=True)
+    ids.add(role.id)
+    await _save_music_roles(gid, ids)
+    note = " ⚠️ C'est @everyone : tout le monde pourra mettre de la musique." if role.is_default() else ""
+    await interaction.response.send_message(f"🎵 {role.mention} peut maintenant utiliser la musique.{note}", ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+@musique_group.command(name="interdire", description="(staff) Retire l'accès à la musique à un rôle ✂️")
+@app_commands.describe(role="Le rôle à retirer de la liste")
+@music_staff
+async def musique_interdire(interaction: discord.Interaction, role: discord.Role):
+    gid = interaction.guild_id
+    ids = await music_role_ids(gid)
+    if role.id not in ids:
+        return await interaction.response.send_message(f"😏 {role.mention} n'était pas autorisé.", ephemeral=True, allowed_mentions=NO_PINGS)
+    ids.discard(role.id)
+    await _save_music_roles(gid, ids)
+    await interaction.response.send_message(f"✂️ {role.mention} n'a plus accès à la musique.", ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+@musique_group.command(name="permissions", description="Voir quels rôles peuvent mettre de la musique 🔑")
+async def musique_permissions(interaction: discord.Interaction):
+    ids = await music_role_ids(interaction.guild_id)
+    txt = ("\n".join(f"• <@&{r}>" for r in sorted(ids)) if ids else "Aucun rôle : seul le staff peut mettre de la musique.")
+    txt += "\n\n_Le staff (permission « Gérer le serveur ») peut toujours l'utiliser._"
+    await interaction.response.send_message(
+        embed=emb("🔑 Rôles autorisés pour la musique", txt, COLOR_PINK), ephemeral=True, allowed_mentions=NO_PINGS
+    )
+
+
+bot.tree.add_command(musique_group)
+
+
+# ---------- Cohabitation avec la voix de /vocal (un seul son à la fois) ----------
+_tts_speak_base = tts_speak
+
+
+async def tts_speak(guild: discord.Guild, text: str) -> bool:  # noqa: F811 : remplace la version de /vocal
+    vc = guild.voice_client
+    if vc is not None and vc.is_connected() and (vc.is_playing() or vc.is_paused()):
+        return False  # la musique joue : je ne parle pas par-dessus
+    ok = await _tts_speak_base(guild, text)
+    spawn(music_advance(guild))  # reprend la file si des titres attendaient pendant que je parlais
+    return ok
+
+
+# ---------- Enregistrement auprès du reste du bot (aucune autre modification à faire) ----------
+EXPECTED_COMMANDS.update({"lien", "musique"})
+REMOVED_COMMANDS.difference_update({"musique", "stat"})  # ces deux commandes existent bien (« stat » aussi)
+FEATURES.append(("f_musique", "Musique", True, {"musique"}))
+_CMD_FEATURE["musique"] = "f_musique"
+CFG_TOGGLES["fonctions"].append(("f_musique", "Musique", True))
+
+
+# =====================================================================
 # RÉACTIONS AUX MESSAGES
 # =====================================================================
 REACT_KEYWORDS = [
@@ -8933,6 +10656,8 @@ async def on_message(message: discord.Message):
         return
     if message.guild and await automod_check(message):
         return
+    if message.guild and await channel_banned(message.channel, message.guild.id):
+        return  # salon interdit (/interdit) : ni réponse, ni réaction, ni !commande
     if message.guild and await is_silenced(message.guild.id):
         return
     nsfw = is_nsfw(message.channel)
@@ -9087,4 +10812,4 @@ async def on_ready():
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not AI_API_KEY:
         raise SystemExit("DISCORD_TOKEN et AI_API_KEY doivent être définis (voir .env.example)")
-    bot.run(DISCORD_TOKEN, log_handler=None).
+    bot.run(DISCORD_TOKEN, log_handler=None)
