@@ -367,4 +367,4 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - [Groq](https://groq.com/) — IA par défaut
 - [Claude](https://claude.ai/new) — IA pour le code
 
-Fait avec 🖤 — *sois sage, petit chat.*
+Fait par [MrMisteur](https://github.com/MrMisteur) - *sois sage, petit chat 🖤*
