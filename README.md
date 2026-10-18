@@ -206,15 +206,6 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/meteo` | Météo d'une ville |
 | `/reset` | Efface la mémoire du salon |
 
-### 🎙️ Vocal
-
-| Commande | Description |
-| --- | --- |
-| `/vocal rejoindre` | Mika rejoint ton salon vocal |
-| `/vocal dire` | Mika dit un texte à voix haute |
-| `/vocal ask` | Pose une question, Mika répond à voix haute (et par écrit) |
-| `/vocal quitter` | Mika quitte le vocal (elle part aussi seule s'il n'y a plus personne) |
-
 ### 💋 Social
 
 | Commande | Description |
