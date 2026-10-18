@@ -42,7 +42,7 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 Dépendances Python utilisées par `bot.py` :
 
 ```
-discord.py[voice]
+discord.py
 davey
 PyNaCl
 aiosqlite
@@ -51,9 +51,7 @@ openai
 ddgs
 python-dotenv
 edge-tts
-imageio-ffmpeg
-yt-dlp
-psutil
+
 ```
 
 > `edge-tts`, `imageio-ffmpeg`, `PyNaCl` et `davey` ne servent qu'à la voix (`/vocal`) ; `yt-dlp` à la musique (`/musique`). `psutil` est optionnel (affiche la RAM dans `/optimiser`). `imageio-ffmpeg` fournit ffmpeg tout seul : rien d'autre à installer.
