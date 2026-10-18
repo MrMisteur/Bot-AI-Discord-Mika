@@ -1,6 +1,6 @@
 # 🖤 Mika — Bot Discord IA
 
-Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». Il discute par mention, réponse ou prénom, propose des jeux, de la modération, de l'économie, des tickets, des Kahoot, des giveaways, parle en vocal et plus encore. Tout tient dans un seul fichier : `bot.py`.
+Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». Il discute par mention, réponse ou prénom, propose des jeux, de la modération, de l'économie, des niveaux, des tickets, des Kahoot, des giveaways, parle en vocal et plus encore. Tout tient dans un seul fichier : `bot.py`.
 
 ## Sommaire
 
@@ -8,6 +8,7 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 - [Prérequis](#prérequis)
 - [Installation](#installation)
 - [Configuration (`.env`)](#configuration-env)
+- [Système de niveaux](#système-de-niveaux)
 - [Permissions et intents Discord](#permissions-et-intents-discord)
 - [Commandes](#commandes)
 - [Logs](#logs)
@@ -18,11 +19,10 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 ## Fonctionnalités
 
 - **Chat IA** : répond aux mentions, aux réponses à ses messages et quand on écrit son prénom ; rebonds spontanés et réactions emoji aléatoires ; mémoire par salon (SQLite) ; mode « protectrice » automatique si quelqu'un semble aller mal.
-- **Voix** : `/vocal` : Mika rejoint ton salon vocal et parle à voix haute (synthèse vocale).
-- **Musique** : `/musique` : lecture en vocal (YouTube, SoundCloud, Bandcamp ou recherche), file d'attente, réservée aux rôles choisis par un admin.
 - **Social** : mariage (jusqu'à 3 par mariage), compatibilité, roast, blagues, 8ball, actions (`/kiss`, `/hug`, `/pat`, `/slap`, `/bonk`, `/gift`).
 - **Jeux** : pierre-feuille-ciseaux (et duel), quiz, blackjack et poker multi-joueurs, quiz créés par les membres, **Kahoot** (quiz live multi-joueurs, créés à la main ou par l'IA), classements et stats.
 - **Économie** : solde, bonus quotidien, dons, classement des plus riches, mises sur les jeux.
+- **Niveaux** : de l'XP en discutant **et en vocal**, des pièces gagnées en vocal, annonces de passage de niveau, rôles offerts à certains niveaux, classements (XP ou temps en vocal), anti-farm.
 - **Modération** : panel de punitions, auto-modération (dont insultes envers le bot), mots interdits, mute vocal, purge, silence, salons interdits au bot.
 - **Règles obligatoires** : les nouveaux membres doivent accepter les règles (bouton), sinon expulsion.
 - **Giveaways** à bouton, tirage automatique, relance possible.
@@ -57,6 +57,8 @@ psutil
 ```
 
 > `edge-tts`, `imageio-ffmpeg`, `PyNaCl` et `davey` ne servent qu'à la voix (`/vocal`) ; `yt-dlp` à la musique (`/musique`). `psutil` est optionnel (affiche la RAM dans `/optimiser`). `imageio-ffmpeg` fournit ffmpeg tout seul : rien d'autre à installer.
+>
+> Le système de niveaux n'ajoute **aucune dépendance**.
 
 ## Installation
 
@@ -119,6 +121,64 @@ AI_API_KEY=ta_cle_api
 
 Le nom de la commande de giveaway se change avec la constante `GW_CMD` en haut de `bot.py` (par défaut `givawayyy`).
 
+> Les réglages des niveaux ne passent **pas** par le `.env` : ils se règlent par serveur, avec `/xp config` ou `/adminpanel` (voir ci-dessous).
+
+## Système de niveaux
+
+Les niveaux sont **désactivés par défaut** (comme l'économie). Un admin les active avec `/xp config actif:True`, ou avec le bouton **Niveaux** dans `/adminpanel` › *Économie & accueil*.
+
+### Comment on gagne de l'XP
+
+| Source | Gain par défaut | Détails |
+| --- | --- | --- |
+| 💬 Chat | environ **20 XP** par message | 1 message par minute et par membre maximum (anti-spam), gain aléatoire ±25 % |
+| 🎙️ Vocal | **10 XP** par minute | Paie toutes les minutes tant que tu remplis les conditions ci-dessous |
+| 🪙 Vocal (argent) | **5 pièces** par minute | Seulement si l'**économie** est activée (`/ecopanel`) |
+| 🎁 Passage de niveau | **0 pièce** par défaut | Bonus optionnel : `argent_niveau` × le niveau atteint |
+
+### Anti-farm en vocal
+
+Pour qu'une minute en vocal compte, il faut :
+
+- ne pas avoir le **casque coupé** (en sourdine, par toi ou par un modérateur) ;
+- ne pas être dans le **salon AFK** du serveur ;
+- être **au moins 2** membres (non bots, casque actif) dans le salon (réglable avec `membres_min`, `1` = même seul).
+
+Les bots ne gagnent rien. Les messages sanctionnés par l'auto-modération et ceux envoyés dans un salon interdit (`/interdit`) ne rapportent pas d'XP.
+
+### Courbe de niveaux
+
+Il faut `5·n² + 50·n + 100` XP pour passer du niveau `n` au niveau `n+1` (même courbe que MEE6).
+
+| Niveau | XP total nécessaire |
+| --- | --- |
+| 1 | 100 |
+| 5 | 1 150 |
+| 10 | 4 675 |
+| 20 | 23 850 |
+
+### Réglages (`/xp config`)
+
+| Option | Défaut | Description |
+| --- | --- | --- |
+| `actif` | désactivé | Active ou coupe les niveaux |
+| `xp_message` | `20` | XP moyen par message |
+| `xp_vocal` | `10` | XP par minute en vocal |
+| `argent_vocal` | `5` | Pièces par minute en vocal (économie requise) |
+| `membres_min` | `2` | Nombre minimum de membres dans le salon vocal |
+| `argent_niveau` | `0` | Pièces offertes à chaque niveau gagné (× le niveau) |
+| `vocal` | activé | Active ou coupe les gains en vocal |
+| `salon` | *(aucun)* | Salon où annoncer les passages de niveau |
+| `salon_auto` | | `True` : annoncer dans le salon où le membre parle (ou dans le salon vocal) |
+
+Sans salon défini, l'annonce est envoyée dans le salon où le membre vient de discuter, ou dans le chat du salon vocal pour un niveau gagné en vocal. Rien n'est annoncé pendant un `/silence`.
+
+### Rôles-récompenses
+
+Avec `/recompense ajouter`, tu choisis un niveau et un rôle : le rôle est donné automatiquement quand le membre atteint ce niveau (plusieurs rôles par niveau possibles). Pour les membres qui ont **déjà** dépassé le niveau, lance `/recompense appliquer`.
+
+> Le rôle du bot doit être placé **au-dessus** des rôles-récompenses, avec la permission « Gérer les rôles ». Retirer de l'XP ou supprimer une récompense **ne retire pas** les rôles déjà donnés.
+
 ## Permissions et intents Discord
 
 Dans le **Developer Portal → Bot → Privileged Gateway Intents**, active :
@@ -127,7 +187,7 @@ Dans le **Developer Portal → Bot → Privileged Gateway Intents**, active :
 - **Server Members Intent**
 - **Presence Intent**
 
-Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. Donne-lui les permissions dont tu as besoin selon les fonctions utilisées : gérer les rôles, gérer les salons, gérer les messages, gérer les webhooks (`/envoyer` sous pseudo), expulser / bannir, exclure des membres (mute), rendre muets / sourdine (vocal), gérer les emojis, voir les salons, envoyer des messages, intégrer des liens, ajouter des réactions, utiliser les emojis externes, se connecter et parler (`/vocal`). Le plus simple est de lui donner **Administrateur** sur un serveur de confiance.
+Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. Donne-lui les permissions dont tu as besoin selon les fonctions utilisées : gérer les rôles (dont les rôles-récompenses de niveau), gérer les salons, gérer les messages, gérer les webhooks (`/envoyer` sous pseudo), expulser / bannir, exclure des membres (mute), rendre muets / sourdine (vocal), gérer les emojis, voir les salons, envoyer des messages, intégrer des liens, ajouter des réactions, utiliser les emojis externes, se connecter et parler (`/vocal`). Le plus simple est de lui donner **Administrateur** sur un serveur de confiance.
 
 > Le rôle du bot doit être placé **au-dessus** des rôles qu'il doit gérer ou sanctionner.
 
@@ -176,7 +236,7 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/kiss`, `/hug`, `/pat`, `/slap`, `/bonk`, `/gift` | Petites scènes avec ping (essaie sur Mika 😏) |
 | `/marie`, `/mariage`, `/divorce` | Mariage (jusqu'à 3 personnes) |
 | `/ship` | Compatibilité entre deux personnes |
-| `/statu` | Profil d'un membre : statut, stats de jeu, argent |
+| `/statu` | Profil d'un membre : statut, stats de jeu, argent et niveau |
 
 ### 🎮 Jeux
 
@@ -201,6 +261,16 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/richesse` | Les plus riches du serveur |
 | `/ecopanel` *(admin)* | Panneau de l'économie et des mises |
 | `/eco config\|donner\|retirer\|reset` *(admin)* | Réglages et gestion des soldes |
+
+### 📈 Niveaux
+
+| Commande | Description |
+| --- | --- |
+| `/niveau [@membre]` | Niveau, barre de progression, rang, temps en vocal et prochain rôle à débloquer |
+| `/topniveaux [tri]` | Classement des membres, par XP (défaut) ou par temps passé en vocal |
+| `/xp config` *(admin)* | Active les niveaux, règle les gains d'XP et d'argent, l'anti-farm et le salon d'annonces |
+| `/xp donner\|retirer\|reset` *(admin)* | Ajuste l'XP d'un membre |
+| `/recompense ajouter\|retirer\|liste\|appliquer` *(admin)* | Rôles offerts en atteignant un niveau |
 
 ### 🔨 Modération
 
@@ -261,7 +331,7 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 
 | Commande | Description |
 | --- | --- |
-| `/adminpanel` *(admin)* | Panneau de configuration complet : fonctionnalités, modération, logs par type, économie, accueil, outils. Options : `page` (section à ouvrir), `reactions`, `spontane`, `salutations`, `nom` (activer / couper directement) |
+| `/adminpanel` *(admin)* | Panneau de configuration complet : fonctionnalités, modération, logs par type, économie et niveaux, accueil, outils. Options : `page` (section à ouvrir), `reactions`, `spontane`, `salutations`, `nom` (activer / couper directement) |
 | `/style` *(admin)* | Change la personnalité du bot sur ce serveur (dominatrice, mommy, douce, sarcastique) |
 | `/envoyer` *(admin)* | Message anonyme, sous un pseudo perso ou avec l'identité du bot |
 | `/creeserveur` *(admin)* | L'IA génère un serveur complet : rôles, salons, permissions |
@@ -283,7 +353,7 @@ Définis le salon avec `/logs`, puis choisis les types à enregistrer dans `/adm
 | Type | Contenu | Par défaut |
 | --- | --- | --- |
 | 🔨 Sanctions | mute, kick, ban, avertissement, vocal, règles refusées | activé |
-| 📋 Commandes | slash, panels, `!nom` | activé |
+| 📋 Commandes | slash, panels, `!nom` (dont `/xp` et `/recompense`) | activé |
 | 🎭 Rôles | donnés, retirés, créés, supprimés, panneaux, rôle auto | activé |
 | 🛡️ Auto-modération | infractions et sanctions auto | activé |
 | 🎫 Tickets | ouverture, fermeture, transcripts | activé |
@@ -296,7 +366,7 @@ Les logs de tickets peuvent aussi avoir un salon dédié (`/ticket config`) ; à
 
 ## Données et sauvegarde
 
-Tout est stocké dans un fichier SQLite (`bot.db` par défaut, modifiable via `DB_PATH`) : mémoire des salons, économie, stats de jeu, quiz, Kahoot, giveaways, règles en attente, paramètres par serveur, etc. Les tables sont créées automatiquement.
+Tout est stocké dans un fichier SQLite (`bot.db` par défaut, modifiable via `DB_PATH`) : mémoire des salons, économie, **niveaux et rôles-récompenses**, stats de jeu, quiz, Kahoot, giveaways, règles en attente, paramètres par serveur, etc. Les tables sont créées automatiquement, y compris sur une base existante : activer les niveaux ne supprime rien.
 
 Pour sauvegarder : arrête le bot et copie `bot.db` (ainsi que les éventuels fichiers `bot.db-wal` et `bot.db-shm`).
 
@@ -314,6 +384,11 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - **`/musique` ne trouve rien ou échoue** : installe `yt-dlp` et mets-le à jour régulièrement (`pip install -U yt-dlp`). YouTube bloque parfois les adresses d'hébergeurs : essaie un lien SoundCloud.
 - **`/vocal` dit qu'il manque quelque chose** : il lui faut `PyNaCl`, `edge-tts` et `imageio-ffmpeg` (ou ffmpeg installé sur la machine).
 - **Les règles n'expulsent personne** : le texte et le salon doivent être définis (`/regle serveur`), et le bot doit avoir « Expulser des membres » avec un rôle au-dessus du nouveau.
+- **`/niveau` répond que les niveaux ne sont pas activés** : lance `/xp config actif:True` (ou active **Niveaux** dans `/adminpanel` › *Économie & accueil*).
+- **Personne ne gagne d'XP en vocal** : vérifie que `vocal` est activé dans `/xp config`, que les membres n'ont pas le casque coupé, ne sont pas dans le salon AFK, et qu'ils sont assez nombreux dans le salon (`membres_min`, 2 par défaut).
+- **L'XP monte mais pas l'argent en vocal** : l'économie doit être activée (`/ecopanel`), et `argent_vocal` doit être supérieur à 0.
+- **Pas d'annonce de passage de niveau** : le bot doit pouvoir envoyer des messages et intégrer des liens dans le salon d'annonces (ou le salon du membre), et il ne doit pas être en `/silence` ni dans un salon interdit.
+- **Un rôle-récompense n'est pas donné** : le rôle du bot doit être **au-dessus** de ce rôle avec « Gérer les rôles » (rôles de bot ou `@everyone` impossibles). Pour les membres qui avaient déjà le niveau avant l'ajout, lance `/recompense appliquer`.
 
 ## Crédits
 
