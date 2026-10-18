@@ -1,22 +1,54 @@
 """Bot Discord IA 🖤 — version e-girl dominatrice
 
-Chat par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir,
-commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift), mariage, mini-jeux (/pfc, /quiz, /blackjack,
-/poker) avec stats (/classement, /stat), météo, /ping, commandes personnalisées (/commande, /cc, !nom),
-modération (/punition panel|deban, rôles, mute vocal, /silence, /logs), /rolereaction, /envoyer, /statu, /emoji,
-/adminpanel + /aideadmin (réservés aux admins), mémoire SQLite.
+##############################################################################
+# SOMMAIRE (l'ordre des parties est celui d'exécution : ne pas le changer,
+# les commandes et classes se déclarent au fil du fichier)
+#
+#   01. [CONFIGURATION ] Imports, configuration (.env), charte graphique, personnalité, phrases « mommy » et salutations.
+#   02. [NOYAU         ] Client Discord, base SQLite, utilitaires IA / texte, recherche web, génération des réponses, logs staff et gestion d'erreurs.
+#   03. [IA            ] Commandes IA (/ask, /recherche, /roast, /blague, /8ball, /choisir) et commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift).
+#   04. [COMMUNAUTÉ    ] Mariage : /marie, /mariage, /divorce (jusqu'à 3 personnes).
+#   05. [JEUX          ] Mini-jeux : /pfc, /ship, /quiz.
+#   06. [JEUX          ] Jeux de cartes : /blackjack et /poker (Texas Hold'em, mises, relances).
+#   07. [JEUX          ] Stats des jeux : /classement et /stat.
+#   08. [ADMINISTRATION] Admin / divers : /style, /reset, /sync, /ping, /logs, /silence, /rolereaction, /aide, /aideadmin.
+#   09. [COMMUNAUTÉ    ] Commandes personnalisées : /commande, /cc, !nom.
+#   10. [COMMUNAUTÉ    ] Météo : /meteo et détection « météo Lyon » dans le chat (Open-Meteo).
+#   11. [COMMUNAUTÉ    ] /statu (profil), /emoji, /envoyer et /lien.
+#   12. [MODÉRATION    ] Modération : /punition panel|deban, mute vocal, casque, rôles, fin automatique des sanctions vocales.
+#   13. [ADMINISTRATION] /test : auto-diagnostic du bot.
+#   14. [ADMINISTRATION] Éléments du panneau admin (silence, envoi, commandes perso, sélecteurs) réutilisés par /adminpanel.
+#   15. [JEUX          ] Économie : /solde, /daily, /donner, /richesse, /eco, /ecopanel et fonctions de mise.
+#   15b.[COMMUNAUTÉ    ] Niveaux : XP chat + vocal, argent en vocal, rôles-récompenses (/niveau, /topniveaux, /xp, /recompense).
+#   16. [JEUX          ] /reglepoker, /regleblackjack et /main.
+#   17. [ADMINISTRATION] /creersalon, /info et /creeserveur (serveur généré par l'IA).
+#   18. [MODÉRATION    ] Auto-modération et /automod.
+#   19. [ADMINISTRATION] Utilitaires communs (BOOT_TIME, get_int, SafeModal) et /optimiser.
+#   20. [IA            ] /dev projet et /dev question.
+#   21. [COMMUNAUTÉ    ] Messages de bienvenue (/bienvenue) et rôle automatique (/autorole).
+#   22. [CONFIGURATION ] Salons interdits au bot : /interdit.
+#   23. [COMMUNAUTÉ    ] /sondage : sondages à boutons.
+#   24. [COMMUNAUTÉ    ] /ticket : système de tickets d'assistance.
+#   25. [ADMINISTRATION] /annonce, /purge, /supprimersalon et /role.
+#   26. [JEUX          ] /quizperso : quiz créés par les membres.
+#   27. [JEUX          ] /pfcduel : duel pierre-feuille-ciseaux.
+#   28. [MODÉRATION    ] Types de logs et événements (arrivées, départs, messages, vocal).
+#   29. [CONFIGURATION ] Fonctionnalités activables, /adminpanel (panneau de configuration).
+#   30. [JEUX          ] /kahoot : quiz live multi-joueurs.
+#   31. [JEUX          ] /jeux : panneau avec tous les jeux.
+#   32. [MODÉRATION    ] /regle : règles obligatoires à accepter.
+#   33. [COMMUNAUTÉ    ] Giveaways (commande définie par GW_CMD).
+#   34. [NOYAU         ] Réactions aux messages, gestionnaire principal on_message et on_ready.
+#
+##############################################################################
 
-NOUVEAUTÉS : /optimiser (perf + conseils), /dev (sites & apps générés par l'IA), /bienvenue (messages d'accueil
-personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge,
-/regle (règles à ACCEPTER sinon expulsion), /envoyer avec l'identité du bot, /givawayyy (giveaways),
-/musique.
 
-LOGS : toutes les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles, deban)
-ET toutes les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
-avec /logs.
+##############################################################################
+# PARTIE 01/34 · CONFIGURATION
+# Imports, configuration (.env), charte graphique, personnalité, phrases « mommy » et salutations.
+# (ancien fichier : mika/config/config.py)
+##############################################################################
 
-Python 3.10+ requis. Voir .env.example pour la config.
-"""
 import asyncio
 import datetime
 import hashlib
@@ -120,6 +152,90 @@ def fit_lines(lines, limit: int = 1024, gap: int = 1) -> str:
 def quote_block(text: str, limit: int = 3500) -> str:
     """Met un texte dans une citation Discord (barre verticale) : il se détache du reste de l'embed."""
     return "\n".join(f"> {l}" if l.strip() else ">" for l in str(text)[:limit].split("\n"))
+
+
+# ---------- Aération automatique de TOUS les aperçus (embeds) ----------
+# Chaque embed envoyé par le bot passe par aerer_embed() : lignes séparées par un vide, espace sous chaque
+# champ. Rien à faire dans les commandes. Pour désactiver : EMBED_AIRY=0 dans le .env.
+EMBED_AIRY = os.getenv("EMBED_AIRY", "1") == "1"
+_GRID_CHARS = set("█▓▒░▀▄■□▪▫◼◻⬛⬜🟥🟧🟨🟩🟦🟪🟫🟤⚫⚪🔴🔵│┃─━┌┐└┘├┤┬┴┼╔╗╚╝║═")
+_EMBED_LIMITS = {"description": 4096, "field": 1024, "total": 6000}
+
+
+def _is_compact(line: str) -> bool:
+    """Ligne de grille / barre / emojis seuls : on ne l'écarte pas de ses voisines (sinon le dessin casse)."""
+    t = line.strip()
+    return sum(c.isalnum() for c in t) < 2 or any(c in _GRID_CHARS for c in t)
+
+
+def aerer_texte(text: str) -> str:
+    """Insère une ligne vide entre les lignes de texte consécutives (hors blocs de code, citations et grilles)."""
+    if not text or "\n" not in text:
+        return text
+    out: list = []
+    in_code = False
+    prev = None  # (type, ligne) de la dernière ligne non vide, None après une ligne vide
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            out.append(raw)
+            prev = None
+            continue
+        if in_code or not line:
+            out.append(raw)
+            prev = None
+            continue
+        kind = "quote" if line.startswith(">") else "compact" if _is_compact(line) else "text"
+        if prev is not None:
+            pk = prev
+            need = not (
+                (pk == "quote" and kind == "quote")
+                or (pk == "compact" and kind == "compact")
+                or (pk == "text" and kind == "compact")
+            )
+            if need:
+                out.append("")
+        out.append(raw)
+        prev = kind
+    return "\n".join(out)
+
+
+def _embed_total(d: dict) -> int:
+    n = len(d.get("title", "")) + len(d.get("description", "")) + len(d.get("footer", {}).get("text", ""))
+    n += len(d.get("author", {}).get("name", ""))
+    return n + sum(len(f.get("name", "")) + len(f.get("value", "")) for f in d.get("fields", []))
+
+
+def aerer_embed(d: dict) -> dict:
+    """Version aérée d'un embed (dict Discord). Si ça dépasse les limites de Discord, on garde l'original."""
+    import copy
+    n = copy.deepcopy(d)
+    desc = n.get("description")
+    if desc:
+        new = aerer_texte(desc)
+        if len(new) <= _EMBED_LIMITS["description"]:
+            n["description"] = new
+    for f in n.get("fields", []):
+        if f.get("inline"):
+            continue
+        v = f.get("value", "")
+        new = aerer_texte(v)
+        if len(new) > _EMBED_LIMITS["field"]:
+            new = v
+        if new.strip() and not new.rstrip().endswith(SP) and len(new) + 2 <= _EMBED_LIMITS["field"]:
+            new += "\n" + SP  # un peu d'air sous le champ
+        f["value"] = new
+    return n if _embed_total(n) <= _EMBED_LIMITS["total"] else d
+
+
+if EMBED_AIRY:
+    _orig_embed_to_dict = discord.Embed.to_dict
+
+    def _airy_to_dict(self):
+        return aerer_embed(_orig_embed_to_dict(self))
+
+    discord.Embed.to_dict = _airy_to_dict
 
 
 # =====================================================================
@@ -351,6 +467,13 @@ def greeting_reply(text: str) -> Optional[str]:
         parts.append(random.choice(GREET_BYE_R))
     return " ".join(parts)
 
+
+##############################################################################
+# PARTIE 02/34 · NOYAU
+# Client Discord, base SQLite, utilitaires IA / texte, recherche web, génération des réponses, logs staff et gestion d'erreurs.
+# (ancien fichier : mika/noyau/core.py)
+##############################################################################
+
 # =====================================================================
 # BOT / CLIENT
 # =====================================================================
@@ -428,6 +551,14 @@ CREATE TABLE IF NOT EXISTS rules_pending (
     channel_id INTEGER NOT NULL DEFAULT 0, message_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id));
 CREATE INDEX IF NOT EXISTS idx_rules_deadline ON rules_pending(deadline);
+CREATE TABLE IF NOT EXISTS levels (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, xp INTEGER NOT NULL DEFAULT 0,
+    voice_secs INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_levels_xp ON levels(guild_id, xp);
+CREATE TABLE IF NOT EXISTS level_rewards (
+    guild_id INTEGER NOT NULL, role_id INTEGER NOT NULL, level INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, role_id));
+CREATE INDEX IF NOT EXISTS idx_level_rewards ON level_rewards(guild_id, level);
 """
 
 
@@ -479,6 +610,8 @@ class MikaBot(discord.Client):
             giveaway_loop.start()
         if not rules_loop.is_running():
             rules_loop.start()
+        if not voice_xp_loop.is_running():
+            voice_xp_loop.start()
         # Sync des commandes seulement si elles ont changé (ou SYNC_ON_START=1, ou /sync)
         sig = commands_signature()
         rows = await db_all("SELECT value FROM settings WHERE guild_id=0 AND key='cmd_sig'")
@@ -500,6 +633,8 @@ class MikaBot(discord.Client):
             giveaway_loop.cancel()
         if rules_loop.is_running():
             rules_loop.cancel()
+        if voice_xp_loop.is_running():
+            voice_xp_loop.cancel()
         if hasattr(self, "db"):
             await self.db.close()
         await super().close()
@@ -962,6 +1097,12 @@ async def on_app_command_completion(interaction: discord.Interaction, command):
     spawn(log_cmd(interaction, name, options_str(interaction)))
 
 
+##############################################################################
+# PARTIE 03/34 · IA
+# Commandes IA (/ask, /recherche, /roast, /blague, /8ball, /choisir) et commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift).
+# (ancien fichier : mika/ia/ia_social.py)
+##############################################################################
+
 # =====================================================================
 # COMMANDES : IA
 # =====================================================================
@@ -1284,6 +1425,12 @@ for _name, _cfg in ACTIONS.items():
     make_action(_name, _cfg)
 
 
+##############################################################################
+# PARTIE 04/34 · COMMUNAUTÉ
+# Mariage : /marie, /mariage, /divorce (jusqu'à 3 personnes).
+# (ancien fichier : mika/communaute/mariage.py)
+##############################################################################
+
 # =====================================================================
 # MARIAGE (/marie, /mariage, /divorce) — jusqu'à 3 personnes par mariage
 # =====================================================================
@@ -1530,6 +1677,12 @@ async def divorce(interaction: discord.Interaction, confirmer: bool = False):
     await interaction.response.send_message(txt, allowed_mentions=NO_PINGS)
 
 
+##############################################################################
+# PARTIE 05/34 · JEUX
+# Mini-jeux : /pfc, /ship, /quiz.
+# (ancien fichier : mika/jeux/minijeux.py)
+##############################################################################
+
 # =====================================================================
 # MINI-JEUX
 # =====================================================================
@@ -1673,6 +1826,12 @@ async def quiz(interaction: discord.Interaction, theme: Optional[str] = None):
     view = QuizView(header, bonne, choix, str(data.get("anecdote", "")))
     view.message = await interaction.followup.send(header, view=view, wait=True)
 
+
+##############################################################################
+# PARTIE 06/34 · JEUX
+# Jeux de cartes : /blackjack et /poker (Texas Hold'em, mises, relances).
+# (ancien fichier : mika/jeux/cartes.py)
+##############################################################################
 
 # =====================================================================
 # BLACKJACK : solo contre Mika ou à la table (jusqu'à 5 joueurs, tour par tour)
@@ -2498,6 +2657,13 @@ async def poker(interaction: discord.Interaction, mise: app_commands.Range[int, 
     await interaction.response.send_message(embed=lobby.embed(), view=lobby)
     lobby.message = await interaction.original_response()
 
+
+##############################################################################
+# PARTIE 07/34 · JEUX
+# Stats des jeux : /classement et /stat.
+# (ancien fichier : mika/jeux/stats.py)
+##############################################################################
+
 # =====================================================================
 # STATS DES JEUX : /classement, /stat
 # =====================================================================
@@ -2580,6 +2746,12 @@ async def stat(interaction: discord.Interaction, joueur: Optional[discord.Member
         )
     await interaction.response.send_message(embed=e)
 
+
+##############################################################################
+# PARTIE 08/34 · ADMINISTRATION
+# Admin / divers : /style, /reset, /sync, /ping, /logs, /silence, /rolereaction, /aide, /aideadmin.
+# (ancien fichier : mika/admin/admin.py)
+##############################################################################
 
 # =====================================================================
 # ADMIN / DIVERS
@@ -2885,6 +3057,16 @@ async def aide(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="📈 Niveaux",
+        value=(
+            "Tu gagnes de l'**XP** en discutant (1 message / minute) et en **vocal** (+ des 🪙 si l'économie est activée).\n"
+            "`/niveau [@membre]` → niveau, barre de progression, rang et temps en vocal.\n"
+            "`/topniveaux [tri]` → le classement (par XP ou par temps en vocal).\n"
+            "Certains niveaux débloquent des rôles 🎭 !"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="📖 Règles",
         value="`/regleblackjack` • `/reglepoker` • `/main` (classement des mains de poker).",
         inline=False,
@@ -2896,8 +3078,7 @@ async def aide(interaction: discord.Interaction):
             "`/statu [@membre]` → profil complet (statut, jeux, argent).\n"
             "`/emoji agrandir` → un emoji perso en grand.\n"
             "`/cc nom` ou `!nom` → commandes personnalisées du serveur.\n"
-            "`/info` → les stats du serveur.\n"
-            "`/vocal rejoindre|dire|ask|quitter` → je viens dans ton vocal et je parle à voix haute."
+            "`/info` → les stats du serveur."
         ),
         inline=False,
     )
@@ -2917,6 +3098,11 @@ async def aide(interaction: discord.Interaction):
             "Sous un giveaway, clique sur **🎉 Participer** (re-clique pour te retirer).\n"
             "`/regle afficher` → relis les règles du serveur."
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔗 Projet",
+        value="`/lien` → le lien GitHub de mon projet.",
         inline=False,
     )
     await interaction.response.send_message(embed=embed)
@@ -2961,6 +3147,16 @@ async def aideadmin(interaction: discord.Interaction):
         value=(
             "`/ecopanel` → panneau : activer, réglages, donner / retirer, classement.\n"
             "`/eco config|donner|retirer|reset` → mêmes actions en commandes."
+        ),
+        inline=False,
+    )
+    e.add_field(
+        name="📈 Niveaux",
+        value=(
+            "`/xp config` → activer, gains d'XP (chat / vocal), pièces en vocal, anti-farm, salon d'annonces.\n"
+            "`/xp donner|retirer|reset` → ajuster l'XP d'un membre.\n"
+            "`/recompense ajouter|retirer|liste|appliquer` → rôles offerts à un niveau.\n"
+            "Aussi dans `/adminpanel` › Économie & accueil."
         ),
         inline=False,
     )
@@ -3050,6 +3246,13 @@ async def aideadmin(interaction: discord.Interaction):
         inline=False,
     )
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+##############################################################################
+# PARTIE 09/34 · COMMUNAUTÉ
+# Commandes personnalisées : /commande, /cc, !nom.
+# (ancien fichier : mika/communaute/commandes_perso.py)
+##############################################################################
 
 # =====================================================================
 # COMMANDES PERSONNALISÉES : créées par les admins, utilisables par tout le monde
@@ -3179,6 +3382,12 @@ async def cc(interaction: discord.Interaction, nom: str):
         cc_render(response, interaction.user, interaction.guild), allowed_mentions=CC_PINGS
     )
 
+
+##############################################################################
+# PARTIE 10/34 · COMMUNAUTÉ
+# Météo : /meteo et détection « météo Lyon » dans le chat (Open-Meteo).
+# (ancien fichier : mika/communaute/meteo.py)
+##############################################################################
 
 # =====================================================================
 # MÉTÉO : /meteo ville, ou « météo Lyon » écrit dans le chat (vraies données Open-Meteo, sans clé)
@@ -3372,6 +3581,12 @@ async def meteo(interaction: discord.Interaction, ville: app_commands.Range[str,
     await interaction.followup.send(embed=embed)
 
 
+##############################################################################
+# PARTIE 11/34 · COMMUNAUTÉ
+# /statu (profil), /emoji, /envoyer et /lien.
+# (ancien fichier : mika/communaute/profil.py)
+##############################################################################
+
 # =====================================================================
 # /statu, /emoji, /envoyer
 # =====================================================================
@@ -3444,6 +3659,10 @@ async def statu(interaction: discord.Interaction, pseudo: Optional[discord.Membe
             e.add_field(name="🎮 Stats de jeu", value="Aucune partie jouée pour l'instant 😏", inline=False)
         if await eco_on(gid):
             e.add_field(name="💰 Argent", value=f"**{await eco_balance(gid, m.id)}** {COIN}", inline=True)
+        if await lvl_on(gid):
+            _xp, _vs = await lvl_get(gid, m.id)
+            _lv, _cur, _need = lvl_progress(_xp)
+            e.add_field(name="📈 Niveau", value=f"**{_lv}** • {lvl_n(_cur)}/{lvl_n(_need)} XP", inline=True)
     if not bot.intents.presences:
         e.set_footer(text="⚠️ Intent « Présences » désactivé : statut et activité ne sont pas fiables.")
     await interaction.response.send_message(embed=e)
@@ -3613,6 +3832,27 @@ async def envoyer(
     le.timestamp = discord.utils.utcnow()
     await mod_log(interaction.guild, le)
 
+
+
+# ---------------------------------------------------------------------
+# 🔗 /lien
+# ---------------------------------------------------------------------
+BOT_LINK = os.getenv("BOT_LINK", "https://github.com/MrMisteur/Bot-AI-Discord-Mika")
+
+
+@bot.tree.command(name="lien", description="Le lien du projet du bot 🔗")
+async def lien(interaction: discord.Interaction):
+    e = emb("🔗 Mon projet", f"Mon code source est ici :\n{BOT_LINK}", COLOR_PINK)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Ouvrir sur GitHub", emoji="🐙", style=discord.ButtonStyle.link, url=BOT_LINK))
+    await interaction.response.send_message(embed=e, view=view)
+
+
+##############################################################################
+# PARTIE 12/34 · MODÉRATION
+# Modération : /punition panel|deban, mute vocal, casque, rôles, fin automatique des sanctions vocales.
+# (ancien fichier : mika/moderation/moderation.py)
+##############################################################################
 
 # =====================================================================
 # MODÉRATION : /punition panel | deban (mute, unmute, avertir, expulser, bannir, nettoyer, mute vocal, casque, rôles)
@@ -4326,6 +4566,12 @@ async def _before_voice_timer():
     await bot.wait_until_ready()
 
 
+##############################################################################
+# PARTIE 13/34 · ADMINISTRATION
+# /test : auto-diagnostic du bot.
+# (ancien fichier : mika/admin/diagnostic.py)
+##############################################################################
+
 # =====================================================================
 # /test : auto-diagnostic (admin)
 # =====================================================================
@@ -4337,9 +4583,9 @@ EXPECTED_COMMANDS = {
     "solde", "daily", "donner", "richesse", "eco", "ecopanel", "reglepoker", "regleblackjack", "main",
     "creersalon", "creeserveur", "info", "automod",
     "optimiser", "dev", "bienvenue", "sondage", "ticket", "annonce", "purge", "kahoot", "jeux",
-    "regle", GW_CMD, "autorole", "interdit", "vocal",
+    "regle", GW_CMD, "autorole", "interdit", "lien", "niveau", "topniveaux", "xp", "recompense",
 }
-REMOVED_COMMANDS = {"musique", "gouts", "favori", "inventaire", "stat"}
+REMOVED_COMMANDS = {"gouts", "favori", "inventaire"}
 
 
 async def _t_db() -> str:
@@ -4563,6 +4809,12 @@ async def test(interaction: discord.Interaction):
     color = {"ok": COLOR_PURPLE, "warn": COLOR_PINK, "fail": COLOR_DARK}[worst]
     await interaction.followup.send(embed=emb(f"🧪 Auto-diagnostic — {verdict}", "\n".join(lines)[:4000], color), ephemeral=True)
 
+
+##############################################################################
+# PARTIE 14/34 · ADMINISTRATION
+# Éléments du panneau admin (silence, envoi, commandes perso, sélecteurs) réutilisés par /adminpanel.
+# (ancien fichier : mika/admin/panel_outils.py)
+##############################################################################
 
 # =====================================================================
 # PANEL ADMIN : /adminpanel (toutes les commandes admin au même endroit)
@@ -4789,6 +5041,12 @@ class AdminPanel(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(embed=emb("🛠️ Panel fermé", "À la prochaine 🖤", COLOR_DARK), view=None)
 
+
+##############################################################################
+# PARTIE 15/34 · JEUX
+# Économie : /solde, /daily, /donner, /richesse, /eco, /ecopanel et fonctions de mise.
+# (ancien fichier : mika/jeux/economie.py)
+##############################################################################
 
 # =====================================================================
 # ÉCONOMIE : porte-monnaie, /daily, /donner, /richesse, mises blackjack & poker
@@ -5173,6 +5431,475 @@ async def ecopanel(interaction: discord.Interaction):
     view.origin = interaction
 
 
+##############################################################################
+# PARTIE 15B · COMMUNAUTÉ
+# Niveaux : XP en discutant et en vocal, argent en vocal, rôles-récompenses, /niveau, /topniveaux, /xp, /recompense.
+##############################################################################
+
+# =====================================================================
+# NIVEAUX : XP au chat et en vocal, argent en vocal, rôles-récompenses
+#   Activé par un admin (/xp config actif:True ou /adminpanel › Économie & accueil).
+#   Courbe (style MEE6) : il faut 5·n² + 50·n + 100 XP pour passer du niveau n au niveau n+1.
+#   • Chat  : 1 message par minute et par membre rapporte de l'XP (anti-spam).
+#   • Vocal : chaque minute passée en vocal rapporte de l'XP (+ des pièces si l'économie est activée).
+#             Anti-farm : casque coupé = rien, salon AFK = rien, et il faut être assez nombreux dans le salon.
+# =====================================================================
+LVL_DEFAULTS = {"msg_xp": 20, "voc_xp": 10, "voc_coins": 5, "voc_min": 2, "up_coins": 0}
+XP_MAX = 1_000_000_000
+LVL_MSG_COOLDOWN = 60  # secondes entre deux messages qui rapportent de l'XP
+VOICE_TICK = 60        # secondes entre deux « paies » vocales
+
+_lvl_last_msg: dict[tuple[int, int], float] = {}
+_lvl_lock = asyncio.Lock()
+
+
+# ---------- Maths (pures) ----------
+def lvl_need(level: int) -> int:
+    """XP nécessaire pour passer de `level` à `level + 1`."""
+    return 5 * level * level + 50 * level + 100
+
+
+def lvl_progress(total_xp: int) -> tuple[int, int, int]:
+    """(niveau, XP dans le niveau en cours, XP à atteindre pour le niveau suivant)."""
+    level, left = 0, max(0, int(total_xp))
+    while left >= lvl_need(level):
+        left -= lvl_need(level)
+        level += 1
+    return level, left, lvl_need(level)
+
+
+def lvl_bar(cur: int, need: int, width: int = 12) -> str:
+    filled = width if need <= 0 else max(0, min(width, int(width * cur / need)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def lvl_dur(secs: int) -> str:
+    h, m = divmod(max(0, int(secs)) // 60, 60)
+    return f"{h} h {m:02d} min" if h else f"{m} min"
+
+
+def lvl_n(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
+# ---------- Réglages ----------
+async def lvl_on(gid: Optional[int]) -> bool:
+    return await get_flag(gid, "levels", False)
+
+
+async def lvl_cfg(gid: Optional[int], key: str) -> int:
+    raw = await get_setting(gid, f"lvl_{key}", str(LVL_DEFAULTS[key]))
+    try:
+        return int(raw)
+    except ValueError:
+        return LVL_DEFAULTS[key]
+
+
+# ---------- Données ----------
+async def lvl_get(gid: int, uid: int) -> tuple[int, int]:
+    """(XP total, secondes passées en vocal)."""
+    rows = await db_all("SELECT xp, voice_secs FROM levels WHERE guild_id=? AND user_id=?", (gid, uid))
+    return (rows[0][0], rows[0][1]) if rows else (0, 0)
+
+
+async def lvl_add_xp(gid: int, uid: int, amount: int, *, voice_secs: int = 0) -> tuple[int, int]:
+    """Ajoute (ou retire, si négatif) de l'XP. Renvoie (ancien niveau, nouveau niveau)."""
+    async with _lvl_lock:
+        old_xp = (await lvl_get(gid, uid))[0]
+        new_xp = max(0, min(old_xp + amount, XP_MAX))
+        await bot.db.execute(
+            "INSERT INTO levels(guild_id, user_id, xp, voice_secs) VALUES (?,?,?,?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET xp=excluded.xp, voice_secs=voice_secs+excluded.voice_secs",
+            (gid, uid, new_xp, voice_secs),
+        )
+        await bot.db.commit()
+    return lvl_progress(old_xp)[0], lvl_progress(new_xp)[0]
+
+
+async def lvl_rewards(gid: int) -> list[tuple[int, int]]:
+    """[(niveau, id du rôle)] triés par niveau."""
+    return await db_all("SELECT level, role_id FROM level_rewards WHERE guild_id=? ORDER BY level, role_id", (gid,))
+
+
+async def lvl_give_roles(member: discord.Member, level: int, rewards: Optional[list] = None) -> list[discord.Role]:
+    """Donne tous les rôles-récompenses auxquels `level` donne droit (ceux qu'il n'a pas déjà)."""
+    if rewards is None:
+        rewards = await lvl_rewards(member.guild.id)
+    given: list[discord.Role] = []
+    for lv, rid in rewards:
+        if lv > level:
+            continue
+        role = member.guild.get_role(rid)
+        if role is None or role in member.roles:
+            continue
+        try:
+            await member.add_roles(role, reason=f"Récompense de niveau ({level})")
+            given.append(role)
+        except discord.HTTPException:
+            log.warning("Récompense de niveau : impossible de donner %s (%s)", role.name, member.guild.id)
+    return given
+
+
+async def lvl_levelup(member: discord.Member, old: int, new: int, where=None):
+    """Après un passage de niveau : argent bonus, rôles-récompenses, annonce."""
+    guild, gid = member.guild, member.guild.id
+    bonus = 0
+    per = await lvl_cfg(gid, "up_coins")
+    if per > 0 and await eco_on(gid):
+        bonus = per * sum(range(old + 1, new + 1))
+        await eco_add(gid, member.id, bonus)
+    roles = await lvl_give_roles(member, new)
+    if await is_silenced(gid):
+        return
+    channel = guild.get_channel(await get_int(gid, "lvl_channel")) or where
+    if channel is None or guild.me is None:
+        return
+    perms = channel.permissions_for(guild.me)
+    if not (perms.send_messages and perms.embed_links):
+        return
+    lines = [f"🎉 {member.mention} passe **niveau {new}** !" + (f" (+{new - old} niveaux d'un coup)" if new - old > 1 else "")]
+    if bonus:
+        lines.append(f"💰 Bonus : **+{lvl_n(bonus)}** {COIN}")
+    if roles:
+        lines.append("🎭 Rôle débloqué : " + ", ".join(r.mention for r in roles))
+    try:
+        await channel.send(embed=emb("📈 Niveau supérieur !", "\n".join(lines), COLOR_PINK), allowed_mentions=USER_PINGS)
+    except discord.HTTPException:
+        pass
+
+
+# ---------- Gains : messages ----------
+async def lvl_on_message(message: discord.Message):
+    try:
+        if message.guild is None or not isinstance(message.author, discord.Member):
+            return
+        gid = message.guild.id
+        if not await lvl_on(gid):
+            return
+        if len((message.content or "").strip()) < 3 and not message.attachments:
+            return
+        key, now = (gid, message.author.id), time.time()
+        if now - _lvl_last_msg.get(key, 0) < LVL_MSG_COOLDOWN:
+            return
+        base = await lvl_cfg(gid, "msg_xp")
+        if base <= 0:
+            return
+        _lvl_last_msg[key] = now
+        gain = random.randint(max(1, round(base * 0.75)), max(1, round(base * 1.25)))
+        old, new = await lvl_add_xp(gid, message.author.id, gain)
+        if new > old:
+            await lvl_levelup(message.author, old, new, message.channel)
+    except Exception:  # noqa: BLE001
+        log.exception("lvl_on_message")
+
+
+# ---------- Gains : vocal ----------
+async def lvl_voice_tick(guild: discord.Guild):
+    gid = guild.id
+    if not await lvl_on(gid) or not await get_flag(gid, "lvl_voice", True):
+        return
+    xp_gain, min_users = await lvl_cfg(gid, "voc_xp"), await lvl_cfg(gid, "voc_min")
+    coins = await lvl_cfg(gid, "voc_coins") if await eco_on(gid) else 0
+    if xp_gain <= 0 and coins <= 0:
+        return
+    afk_id = guild.afk_channel.id if guild.afk_channel else 0
+    for ch in guild.voice_channels:
+        if ch.id == afk_id:
+            continue
+        eligible = [
+            m for m in ch.members
+            if not m.bot and m.voice is not None and not (m.voice.deaf or m.voice.self_deaf)
+        ]
+        if len(eligible) < min_users:
+            continue
+        for m in eligible:
+            old, new = await lvl_add_xp(gid, m.id, xp_gain, voice_secs=VOICE_TICK)
+            if coins > 0:
+                await eco_add(gid, m.id, coins)
+            if new > old:
+                await lvl_levelup(m, old, new, ch)
+
+
+@tasks.loop(seconds=VOICE_TICK)
+async def voice_xp_loop():
+    now = time.time()
+    for k in [k for k, t in _lvl_last_msg.items() if now - t > 3600]:  # ménage du cooldown
+        _lvl_last_msg.pop(k, None)
+    for guild in list(bot.guilds):
+        try:
+            await lvl_voice_tick(guild)
+        except Exception:  # noqa: BLE001 : une erreur sur un serveur ne doit pas arrêter la boucle
+            log.exception("voice_xp_loop : serveur %s", guild.id)
+
+
+@voice_xp_loop.before_loop
+async def _before_voice_xp():
+    await bot.wait_until_ready()
+
+
+# ---------- Commandes membres ----------
+NO_LEVELS = "📈 Les niveaux ne sont pas activés sur ce serveur."
+
+
+@bot.tree.command(name="niveau", description="Ton niveau, ton XP et ton rang 📈")
+@app_commands.describe(membre="Voir le niveau d'un autre membre (optionnel)")
+@app_commands.guild_only()
+async def niveau(interaction: discord.Interaction, membre: Optional[discord.Member] = None):
+    gid = interaction.guild_id
+    if not await lvl_on(gid):
+        return await interaction.response.send_message(NO_LEVELS, ephemeral=True)
+    target = membre or interaction.user
+    if target.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de niveau 🤖", ephemeral=True)
+    xp, vsecs = await lvl_get(gid, target.id)
+    level, cur, need = lvl_progress(xp)
+    e = emb(f"📈 {target.display_name}", None, COLOR_PINK)
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.add_field(name="Niveau", value=f"**{level}**", inline=True)
+    if xp > 0:
+        rank = (await db_all("SELECT COUNT(*)+1 FROM levels WHERE guild_id=? AND xp>?", (gid, xp)))[0][0]
+        total = (await db_all("SELECT COUNT(*) FROM levels WHERE guild_id=? AND xp>0", (gid,)))[0][0]
+        e.add_field(name="Rang", value=f"**#{rank}** / {total}", inline=True)
+    else:
+        e.add_field(name="Rang", value="—", inline=True)
+    e.add_field(name="XP total", value=f"**{lvl_n(xp)}**", inline=True)
+    e.add_field(
+        name=f"Vers le niveau {level + 1}",
+        value=f"{lvl_bar(cur, need)}  **{lvl_n(cur)}** / {lvl_n(need)} XP",
+        inline=False,
+    )
+    e.add_field(name="🎙️ Temps en vocal", value=lvl_dur(vsecs), inline=True)
+    nxt = await db_all(
+        "SELECT level, role_id FROM level_rewards WHERE guild_id=? AND level>? ORDER BY level LIMIT 1", (gid, level)
+    )
+    if nxt:
+        e.add_field(name="🎭 Prochaine récompense", value=f"Niveau **{nxt[0][0]}** → <@&{nxt[0][1]}>", inline=True)
+    await interaction.response.send_message(embed=e, allowed_mentions=NO_PINGS)
+
+
+@bot.tree.command(name="topniveaux", description="Les membres les plus actifs du serveur 🏆")
+@app_commands.describe(tri="Classer par XP (par défaut) ou par temps passé en vocal")
+@app_commands.choices(tri=[
+    app_commands.Choice(name="XP / niveau", value="xp"),
+    app_commands.Choice(name="Temps en vocal", value="voc"),
+])
+@app_commands.guild_only()
+async def topniveaux(interaction: discord.Interaction, tri: Optional[app_commands.Choice[str]] = None):
+    gid = interaction.guild_id
+    if not await lvl_on(gid):
+        return await interaction.response.send_message(NO_LEVELS, ephemeral=True)
+    by_voice = tri is not None and tri.value == "voc"
+    col = "voice_secs" if by_voice else "xp"  # valeur interne, jamais saisie par l'utilisateur
+    rows = await db_all(
+        f"SELECT user_id, xp, voice_secs FROM levels WHERE guild_id=? AND {col}>0 ORDER BY {col} DESC, user_id ASC LIMIT 10",
+        (gid,),
+    )
+    if not rows:
+        return await interaction.response.send_message("Personne n'a encore de niveau 😏", ephemeral=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, xp, vs) in enumerate(rows):
+        pos = medals[i] if i < 3 else f"`#{i + 1}`"
+        detail = f"🎙️ **{lvl_dur(vs)}**" if by_voice else f"niveau **{lvl_progress(xp)[0]}** • {lvl_n(xp)} XP"
+        lines.append(f"{pos} <@{uid}> — {detail}")
+    title = "🎙️ Les plus bavards en vocal" if by_voice else "🏆 Classement des niveaux"
+    await interaction.response.send_message(embed=emb(title, "\n".join(lines), COLOR_PURPLE), allowed_mentions=NO_PINGS)
+
+
+# ---------- Commandes admin : /xp ----------
+xp_group = app_commands.Group(
+    name="xp", description="(admin) Gère les niveaux du serveur 📈",
+    guild_only=True, default_permissions=discord.Permissions(administrator=True),
+)
+
+
+async def lvl_cfg_embed(guild: discord.Guild) -> discord.Embed:
+    gid = guild.id
+    eco = await eco_on(gid)
+    voice = await get_flag(gid, "lvl_voice", True)
+    cid = await get_int(gid, "lvl_channel")
+    e = emb("📈 Niveaux", "XP en discutant et en vocal, argent en vocal, rôles-récompenses.", COLOR_DARK)
+    e.add_field(name="État", value="🟢 Activés" if await lvl_on(gid) else "🔴 Désactivés (`/xp config actif:True`)", inline=False)
+    e.add_field(name="💬 Chat", value=f"**{await lvl_cfg(gid, 'msg_xp')}** XP par message (1 / minute max)", inline=False)
+    voc = f"{'✅' if voice else '❌'} **{await lvl_cfg(gid, 'voc_xp')}** XP / min"
+    if eco:
+        voc += f" + **{await lvl_cfg(gid, 'voc_coins')}** {COIN} / min"
+    else:
+        voc += " • argent : économie désactivée (`/eco config`)"
+    voc += f"\n👥 Minimum **{await lvl_cfg(gid, 'voc_min')}** membre(s) (casque coupé = non compté)"
+    e.add_field(name="🎙️ Vocal", value=voc, inline=False)
+    e.add_field(name="🎁 Bonus de niveau", value=f"**{await lvl_cfg(gid, 'up_coins')}** {COIN} × le niveau atteint", inline=True)
+    e.add_field(name="📣 Annonces", value=f"<#{cid}>" if cid else "Dans le salon du membre", inline=True)
+    e.add_field(name="🎭 Récompenses", value=f"**{len(await lvl_rewards(gid))}** rôle(s) (`/recompense liste`)", inline=True)
+    return e
+
+
+@xp_group.command(name="config", description="Active les niveaux et règle les gains d'XP / d'argent")
+@app_commands.describe(
+    actif="Activer / désactiver les niveaux",
+    xp_message="XP moyen par message (1 message par minute max)",
+    xp_vocal="XP gagné par minute en vocal",
+    argent_vocal="Pièces gagnées par minute en vocal (économie requise)",
+    membres_min="Membres mini dans le vocal pour gagner (anti-farm, 1 = même seul)",
+    argent_niveau="Pièces offertes à chaque niveau gagné, × le niveau (0 = aucune)",
+    vocal="Activer / désactiver les gains en vocal",
+    salon="Salon où annoncer les passages de niveau",
+    salon_auto="True = annoncer dans le salon où le membre parle (défaut)",
+)
+@admin_only
+async def xp_config(
+    interaction: discord.Interaction, actif: Optional[bool] = None,
+    xp_message: Optional[app_commands.Range[int, 0, 1000]] = None,
+    xp_vocal: Optional[app_commands.Range[int, 0, 1000]] = None,
+    argent_vocal: Optional[app_commands.Range[int, 0, 100000]] = None,
+    membres_min: Optional[app_commands.Range[int, 1, 25]] = None,
+    argent_niveau: Optional[app_commands.Range[int, 0, 100000]] = None,
+    vocal: Optional[bool] = None, salon: Optional[discord.TextChannel] = None, salon_auto: Optional[bool] = None,
+):
+    gid = interaction.guild_id
+    if salon is not None:
+        p = salon.permissions_for(interaction.guild.me)
+        if not (p.send_messages and p.embed_links):
+            return await interaction.response.send_message(
+                "🚫 Il me manque « Envoyer des messages » et « Intégrer des liens » dans ce salon.", ephemeral=True
+            )
+        await set_setting(gid, "lvl_channel", str(salon.id))
+    elif salon_auto:
+        await set_setting(gid, "lvl_channel", "0")
+    if actif is not None:
+        await set_flag(gid, "levels", actif)
+    if vocal is not None:
+        await set_flag(gid, "lvl_voice", vocal)
+    for key, val in (("msg_xp", xp_message), ("voc_xp", xp_vocal), ("voc_coins", argent_vocal),
+                     ("voc_min", membres_min), ("up_coins", argent_niveau)):
+        if val is not None:
+            await set_setting(gid, f"lvl_{key}", str(val))
+    await interaction.response.send_message(embed=await lvl_cfg_embed(interaction.guild), ephemeral=True)
+
+
+@xp_group.command(name="donner", description="Donne de l'XP à un membre")
+@app_commands.describe(membre="Le membre", montant="Combien d'XP")
+@admin_only
+async def xp_give(interaction: discord.Interaction, membre: discord.Member, montant: app_commands.Range[int, 1, XP_MAX]):
+    if membre.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de niveau 🤖", ephemeral=True)
+    old, new = await lvl_add_xp(interaction.guild_id, membre.id, montant)
+    await interaction.response.send_message(f"✅ +{lvl_n(montant)} XP pour {membre.mention} (niveau {new}).", ephemeral=True)
+    if new > old:
+        await lvl_levelup(membre, old, new)
+
+
+@xp_group.command(name="retirer", description="Retire de l'XP à un membre")
+@app_commands.describe(membre="Le membre", montant="Combien d'XP")
+@admin_only
+async def xp_take(interaction: discord.Interaction, membre: discord.Member, montant: app_commands.Range[int, 1, XP_MAX]):
+    if membre.bot:
+        return await interaction.response.send_message("Les bots n'ont pas de niveau 🤖", ephemeral=True)
+    _, new = await lvl_add_xp(interaction.guild_id, membre.id, -montant)
+    await interaction.response.send_message(
+        f"✅ −{lvl_n(montant)} XP pour {membre.mention} (niveau {new}). Les rôles déjà obtenus ne sont pas retirés.",
+        ephemeral=True,
+    )
+
+
+@xp_group.command(name="reset", description="Remet l'XP et le temps vocal d'un membre à zéro")
+@app_commands.describe(membre="Le membre")
+@admin_only
+async def xp_reset(interaction: discord.Interaction, membre: discord.Member):
+    await db_run("DELETE FROM levels WHERE guild_id=? AND user_id=?", (interaction.guild_id, membre.id))
+    await interaction.response.send_message(
+        f"✅ {membre.mention} repart de zéro. Les rôles déjà obtenus ne sont pas retirés.", ephemeral=True
+    )
+
+
+bot.tree.add_command(xp_group)
+
+
+# ---------- Commandes admin : /recompense (rôles offerts à un niveau) ----------
+recompense_group = app_commands.Group(
+    name="recompense", description="(admin) Rôles offerts en atteignant un niveau 🎭",
+    guild_only=True, default_permissions=discord.Permissions(administrator=True),
+)
+
+
+@recompense_group.command(name="ajouter", description="Offre un rôle à partir d'un certain niveau")
+@app_commands.describe(niveau="Niveau à atteindre", role="Le rôle à donner (plusieurs rôles possibles par niveau)")
+@admin_only
+async def reward_add(interaction: discord.Interaction, niveau: app_commands.Range[int, 1, 1000], role: discord.Role):
+    me = interaction.guild.me
+    if role.is_default() or role.managed:
+        return await interaction.response.send_message("🚫 Ce rôle ne peut pas être attribué à la main.", ephemeral=True)
+    if role >= me.top_role:
+        return await interaction.response.send_message(
+            "🚫 Ce rôle est au-dessus (ou au niveau) du mien : monte mon rôle dans la liste des rôles du serveur.", ephemeral=True
+        )
+    await db_run(
+        "INSERT INTO level_rewards(guild_id, role_id, level) VALUES (?,?,?) "
+        "ON CONFLICT(guild_id, role_id) DO UPDATE SET level=excluded.level",
+        (interaction.guild_id, role.id, niveau),
+    )
+    await interaction.response.send_message(
+        f"✅ {role.mention} sera offert au **niveau {niveau}**. "
+        "Pour ceux qui l'ont déjà dépassé : `/recompense appliquer`.",
+        ephemeral=True,
+    )
+
+
+@recompense_group.command(name="retirer", description="Supprime une récompense (le rôle reste aux membres qui l'ont)")
+@app_commands.describe(role="Le rôle-récompense à supprimer")
+@admin_only
+async def reward_remove(interaction: discord.Interaction, role: discord.Role):
+    cur = await bot.db.execute("DELETE FROM level_rewards WHERE guild_id=? AND role_id=?", (interaction.guild_id, role.id))
+    await bot.db.commit()
+    msg = f"✅ {role.mention} n'est plus une récompense." if cur.rowcount else "Ce rôle n'est pas une récompense 🤔"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@recompense_group.command(name="liste", description="Liste les rôles-récompenses")
+@admin_only
+async def reward_list(interaction: discord.Interaction):
+    rows = await lvl_rewards(interaction.guild_id)
+    if not rows:
+        return await interaction.response.send_message("Aucune récompense. Ajoute-en avec `/recompense ajouter`.", ephemeral=True)
+    txt = "\n".join(f"Niveau **{lv}** → <@&{rid}>" for lv, rid in rows)
+    await interaction.response.send_message(embed=emb("🎭 Rôles-récompenses", txt[:4000], COLOR_PINK), ephemeral=True)
+
+
+@recompense_group.command(name="appliquer", description="Donne les rôles aux membres qui y ont déjà droit")
+@admin_only
+async def reward_apply(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    gid = interaction.guild_id
+    rewards = await lvl_rewards(gid)
+    if not rewards:
+        return await interaction.followup.send("Aucune récompense à appliquer.", ephemeral=True)
+    lowest = min(lv for lv, _ in rewards)
+    rows = await db_all("SELECT user_id, xp FROM levels WHERE guild_id=? AND xp>0", (gid,))
+    count = 0
+    for uid, xp in rows:
+        member = interaction.guild.get_member(uid)
+        level = lvl_progress(xp)[0]
+        if member is None or member.bot or level < lowest:
+            continue
+        if await lvl_give_roles(member, level, rewards):
+            count += 1
+    await interaction.followup.send(f"✅ Rôles distribués à **{count}** membre(s).", ephemeral=True)
+
+
+bot.tree.add_command(recompense_group)
+
+
+async def _h_levels(i: discord.Interaction):
+    """Bouton du /adminpanel : résumé des réglages de niveaux."""
+    await i.response.send_message(embed=await lvl_cfg_embed(i.guild), ephemeral=True)
+
+
+##############################################################################
+# PARTIE 16/34 · JEUX
+# /reglepoker, /regleblackjack et /main.
+# (ancien fichier : mika/jeux/regles_jeux.py)
+##############################################################################
+
 # =====================================================================
 # RÈGLES : /reglepoker, /regleblackjack  +  /main (classement des mains de poker)
 # =====================================================================
@@ -5293,6 +6020,12 @@ async def main_cmd(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=e)
 
+
+##############################################################################
+# PARTIE 17/34 · ADMINISTRATION
+# /creersalon, /info et /creeserveur (serveur généré par l'IA).
+# (ancien fichier : mika/admin/serveur.py)
+##############################################################################
 
 # =====================================================================
 # CRÉATION DE SALONS : /creersalon (texte, vocal ou catégorie)
@@ -5682,6 +6415,12 @@ async def creeserveur(
     view.origin = interaction
 
 
+##############################################################################
+# PARTIE 18/34 · MODÉRATION
+# Auto-modération et /automod.
+# (ancien fichier : mika/moderation/automod.py)
+##############################################################################
+
 # =====================================================================
 # AUTO-MODÉRATION : suppression automatique + sanctions progressives (activables / désactivables)
 #   /automod config|mot|pardon  (ou le bouton « Auto-modération » du /adminpanel)
@@ -5939,6 +6678,12 @@ async def automod_status(interaction: discord.Interaction):
 bot.tree.add_command(automod_group)
 
 
+##############################################################################
+# PARTIE 19/34 · ADMINISTRATION
+# Utilitaires communs (BOOT_TIME, get_int, SafeModal) et /optimiser.
+# (ancien fichier : mika/admin/optimiser.py)
+##############################################################################
+
 # =====================================================================
 # NOUVEAUTÉS : /optimiser • /dev • /bienvenue • /sondage • /ticket • /annonce • /purge
 #   Tout est persistant (boutons actifs après un redémarrage) et tracé dans le salon de /logs.
@@ -6186,6 +6931,12 @@ async def optimiser(interaction: discord.Interaction, test_ia: bool = False):
     )
 
 
+##############################################################################
+# PARTIE 20/34 · IA
+# /dev projet et /dev question.
+# (ancien fichier : mika/ia/dev.py)
+##############################################################################
+
 # =====================================================================
 # 💻 /dev projet | question : assistance pour créer sites web et applications
 # =====================================================================
@@ -6359,6 +7110,12 @@ async def dev_question(
 
 bot.tree.add_command(dev_group)
 
+
+##############################################################################
+# PARTIE 21/34 · COMMUNAUTÉ
+# Messages de bienvenue (/bienvenue) et rôle automatique (/autorole).
+# (ancien fichier : mika/communaute/accueil.py)
+##############################################################################
 
 # =====================================================================
 # 👋 /bienvenue config | generer | tester : messages de bienvenue personnalisés
@@ -6610,6 +7367,76 @@ async def autorole_etat(interaction: discord.Interaction):
     await interaction.response.send_message(embed=emb("🎀 Rôles automatiques", "\n".join(lines), COLOR_PINK), ephemeral=True)
 
 
+
+class WelcomePreview(_OwnerView):
+    def __init__(self, invoker_id: int, template: str):
+        super().__init__(invoker_id)
+        self.template = template
+
+    @discord.ui.button(label="Utiliser ce message", emoji="✅", style=discord.ButtonStyle.success)
+    async def b_use(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await set_setting(interaction.guild_id, "welcome_text", self.template)
+        await set_setting(interaction.guild_id, "welcome_mode", "texte")
+        await interaction.response.edit_message(
+            content="✅ Modèle enregistré (mode texte). Active l'accueil avec `/bienvenue config actif:True salon:#…`.",
+            embed=None, view=None,
+        )
+
+    @discord.ui.button(label="Annuler", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Annulé 😏", embed=None, view=None)
+
+
+@bienvenue_group.command(name="generer", description="L'IA écrit un modèle de bienvenue à ton goût ✨")
+@app_commands.describe(ton="Ambiance voulue : chaleureux, gaming, drôle, sobre, e-girl…")
+@staff_only
+@ai_cd()
+async def bienvenue_generer(interaction: discord.Interaction, ton: app_commands.Range[str, 3, 200]):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    system = (
+        persona(False, await get_style(interaction.guild_id))
+        + f"\n\nTu écris un MODÈLE réutilisable de message de bienvenue (2 à 4 phrases). Utilise ces variables telles quelles : "
+        f"{WELCOME_VARS}. Pas de @everyone/@here, pas de lien. Réponds avec le message seul."
+    )
+    try:
+        tpl = await ask_ai([{"role": "user", "content": f"Ambiance voulue : {ton}"}], system=system, max_tokens=500)
+    except Exception as e:  # noqa: BLE001
+        return await interaction.followup.send(fail_msg(e), ephemeral=True)
+    tpl = tpl.strip().replace("@everyone", "everyone").replace("@here", "here")[:1000]
+    if not tpl:
+        return await interaction.followup.send("😅 Rien de généré, réessaie.", ephemeral=True)
+    preview = welcome_render(tpl, interaction.user)
+    e = emb(
+        "✨ Aperçu du message de bienvenue",
+        airy(["_Voilà ce que verront les nouveaux :_", quote_block(preview, 2500)]),
+        COLOR_PINK,
+    )
+    e.add_field(name="📝 Modèle enregistrable", value=f"{SP}\n```{tpl[:900]}```", inline=False)
+    await interaction.followup.send(embed=e, view=WelcomePreview(interaction.user.id, tpl), ephemeral=True)
+
+
+@bienvenue_group.command(name="tester", description="Voir à quoi ressemblera l'accueil (aperçu privé)")
+@staff_only
+@ai_cd()
+async def bienvenue_tester(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    text = await build_welcome(interaction.user)
+    await interaction.followup.send(
+        embed=emb("👋 Aperçu de l'accueil", airy(["_Voilà ce que verra un nouvel arrivant :_", quote_block(text)]), COLOR_PINK),
+        ephemeral=True,
+    )
+
+
+bot.tree.add_command(bienvenue_group)
+bot.tree.add_command(autorole_group)
+
+
+##############################################################################
+# PARTIE 22/34 · CONFIGURATION
+# Salons interdits au bot : /interdit.
+# (ancien fichier : mika/config/interdit.py)
+##############################################################################
+
 # =====================================================================
 # 🚫 SALONS INTERDITS AU BOT : /interdit ajouter | retirer | liste | vider
 # =====================================================================
@@ -6717,281 +7544,16 @@ async def interdit_vider(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Toutes les interdictions sont levées.", ephemeral=True)
 
 
-# =====================================================================
-# 🎙️ MIKA EN VOCAL : /vocal rejoindre | quitter | dire | ask
-# Prérequis (pip) : PyNaCl, edge-tts et imageio-ffmpeg (fournit ffmpeg tout seul). Voix : MIKA_VOICE dans .env.
-# =====================================================================
-VOICE_TTS = os.getenv("MIKA_VOICE", "fr-FR-DeniseNeural")
-VOICE_MAX_CHARS = 350
-_voice_locks: dict[int, asyncio.Lock] = {}
-_TTS_CUSTOM_EMOJI = re.compile(r"<a?:\w+:\d+>")
-_TTS_MENTION = re.compile(r"<(?:@!?|@&|#)\d+>")
-_TTS_URL = re.compile(r"https?://\S+")
-_TTS_EMOJI = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\uFE0F\u200D]")
 
 
-def tts_clean(text: str) -> str:
-    """Texte lisible à voix haute : sans mentions, liens, markdown ni emojis."""
-    t = _TTS_CUSTOM_EMOJI.sub(" ", text)
-    t = _TTS_MENTION.sub(" ", t)
-    t = _TTS_URL.sub(" lien ", t)
-    t = discord.utils.remove_markdown(t)
-    t = _TTS_EMOJI.sub("", t)
-    return re.sub(r"\s+", " ", t).strip()[:VOICE_MAX_CHARS]
-
-
-def ffmpeg_path() -> Optional[str]:
-    """ffmpeg installé sur la machine, sinon celui fourni par le paquet pip « imageio-ffmpeg » (rien à installer à la main)."""
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def voice_missing() -> Optional[str]:
-    """None si tout est prêt, sinon la liste de ce qui manque sur l'hébergement."""
-    missing = []
-    if ffmpeg_path() is None:
-        missing.append("ffmpeg (ajoute `imageio-ffmpeg` au requirements.txt)")
-    try:
-        import nacl  # noqa: F401
-    except ImportError:
-        missing.append("PyNaCl")
-    try:
-        import edge_tts  # noqa: F401
-    except ImportError:
-        missing.append("edge-tts")
-    return ", ".join(missing) or None
-
-
-async def tts_speak(guild: discord.Guild, text: str) -> bool:
-    """Génère la voix (edge-tts) puis la joue dans le vocal où je suis. Les phrases passent l'une après l'autre."""
-    text = tts_clean(text)
-    vc = guild.voice_client
-    if not text or vc is None or not vc.is_connected():
-        return False
-    import edge_tts
-
-    lock = _voice_locks.setdefault(guild.id, asyncio.Lock())
-    async with lock:
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
-        try:
-            await asyncio.wait_for(edge_tts.Communicate(text, VOICE_TTS).save(path), timeout=30)
-            vc = guild.voice_client
-            if vc is None or not vc.is_connected():
-                return False
-            loop = asyncio.get_running_loop()
-            done: asyncio.Future = loop.create_future()
-
-            def _after(err):
-                loop.call_soon_threadsafe(lambda: done.done() or done.set_result(err))
-
-            vc.play(discord.FFmpegPCMAudio(path, executable=ffmpeg_path() or "ffmpeg"), after=_after)
-            try:
-                await asyncio.wait_for(done, timeout=120)
-            except asyncio.TimeoutError:
-                vc.stop()
-                return False
-            return True
-        except Exception as e:  # noqa: BLE001
-            log.warning("Voix : %r", e)
-            return False
-        finally:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
-
-async def voice_auto_leave(guild: discord.Guild):
-    try:
-        vc = guild.voice_client
-        if vc is None or not vc.is_connected() or any(not m.bot for m in vc.channel.members):
-            return
-        await asyncio.sleep(20)
-        vc = guild.voice_client
-        if vc is not None and vc.is_connected() and not any(not m.bot for m in vc.channel.members):
-            await vc.disconnect()
-    except Exception:  # noqa: BLE001
-        log.exception("voice_auto_leave")
-
-
-vocal_group = app_commands.Group(
-    name="vocal", description="Je rejoins ton vocal et je parle à voix haute 🎙️", guild_only=True,
-)
-
-
-async def _voice_gate(interaction: discord.Interaction) -> Optional[discord.VoiceClient]:
-    """Vérifie qu'on peut me faire parler : outils présents, moi en vocal, toi dans le même salon."""
-    missing = voice_missing()
-    if missing:
-        await interaction.response.send_message(
-            f"🔧 Je ne peux pas parler : il manque sur l'hébergement **{missing}**. Voir `requirements.txt` / ffmpeg.",
-            ephemeral=True,
-        )
-        return None
-    vc = interaction.guild.voice_client
-    if vc is None or not vc.is_connected():
-        await interaction.response.send_message("Je ne suis dans aucun vocal. Fais `/vocal rejoindre` 😏", ephemeral=True)
-        return None
-    voice = interaction.user.voice
-    if voice is None or voice.channel is None or voice.channel.id != vc.channel.id:
-        await interaction.response.send_message(f"Viens d'abord dans {vc.channel.mention}, petit chat 😏", ephemeral=True)
-        return None
-    return vc
-
-
-@vocal_group.command(name="rejoindre", description="Je rejoins ton salon vocal 🎧")
-@ai_cd()
-async def vocal_rejoindre(interaction: discord.Interaction):
-    missing = voice_missing()
-    if missing:
-        return await interaction.response.send_message(
-            f"🔧 Je ne peux pas parler : il manque sur l'hébergement **{missing}**. Voir `requirements.txt` / ffmpeg.",
-            ephemeral=True,
-        )
-    guild, voice = interaction.guild, interaction.user.voice
-    if voice is None or voice.channel is None:
-        return await interaction.response.send_message("Rejoins d'abord un salon vocal, petit chat 😏", ephemeral=True)
-    ch = voice.channel
-    if await channel_banned(ch, guild.id):
-        return await interaction.response.send_message("🚫 Je n'ai pas le droit de venir dans ce vocal.", ephemeral=True)
-    perms = ch.permissions_for(guild.me)
-    if not (perms.connect and perms.speak):
-        return await interaction.response.send_message(
-            f"🚫 Il me faut « Se connecter » et « Parler » dans {ch.mention}.", ephemeral=True
-        )
-    await interaction.response.defer(thinking=True)
-    try:
-        vc = guild.voice_client
-        if vc is not None and vc.is_connected():
-            if vc.channel.id != ch.id:
-                await vc.move_to(ch)
-        else:
-            await ch.connect(timeout=20, self_deaf=True)
-    except (asyncio.TimeoutError, discord.ClientException, discord.HTTPException) as e:
-        log.warning("Vocal : connexion impossible (%r)", e)
-        return await interaction.followup.send("😅 Je n'arrive pas à me connecter au vocal, réessaie dans un instant.")
-    await interaction.followup.send(
-        f"🎧 Je suis dans {ch.mention}. `/vocal dire` pour me faire parler, `/vocal ask` pour me poser une question."
-    )
-    spawn(tts_speak(guild, f"Coucou, c'est {BOT_NAME}. Je suis là."))
-
-
-@vocal_group.command(name="quitter", description="Je quitte le vocal 👋")
-async def vocal_quitter(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc is None or not vc.is_connected():
-        return await interaction.response.send_message("Je ne suis dans aucun vocal 😏", ephemeral=True)
-    me_in = interaction.user.voice is not None and interaction.user.voice.channel == vc.channel
-    p = interaction.permissions
-    if not (me_in or p.administrator or p.move_members):
-        return await interaction.response.send_message(f"Viens dans {vc.channel.mention} pour me renvoyer 😏", ephemeral=True)
-    await vc.disconnect()
-    await interaction.response.send_message("👋 Je m'en vais. À plus, petit chat 🖤")
-
-
-@vocal_group.command(name="dire", description="Je dis ça à voix haute 🗣️")
-@app_commands.describe(texte="Ce que je dois dire")
-@ai_cd()
-async def vocal_dire(interaction: discord.Interaction, texte: app_commands.Range[str, 1, 300]):
-    if await _voice_gate(interaction) is None:
-        return
-    if not tts_clean(texte):
-        return await interaction.response.send_message("Je n'ai rien à lire dans ça 😏", ephemeral=True)
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    ok = await tts_speak(interaction.guild, texte)
-    await interaction.followup.send("🗣️ C'est dit." if ok else "😅 Je n'ai pas réussi à parler, réessaie.", ephemeral=True)
-
-
-@vocal_group.command(name="ask", description="Pose-moi une question, je réponds à voix haute 💬")
-@app_commands.describe(question="Ta question")
-@ai_cd()
-async def vocal_ask(interaction: discord.Interaction, question: app_commands.Range[str, 1, 300]):
-    if await _voice_gate(interaction) is None:
-        return
-    await interaction.response.defer(thinking=True)
-    try:
-        answer = await generate_reply(
-            interaction.channel_id, interaction.user.display_name, interaction.user.id, question,
-            guild_id=interaction.guild_id, nsfw=is_nsfw(interaction.channel),
-        )
-    except Exception as e:  # noqa: BLE001
-        return await interaction.followup.send(fail_msg(e))
-    for c in split_text(answer):
-        await interaction.followup.send(c, allowed_mentions=NO_PINGS)
-    await tts_speak(interaction.guild, answer)
-
-
-class WelcomePreview(_OwnerView):
-    def __init__(self, invoker_id: int, template: str):
-        super().__init__(invoker_id)
-        self.template = template
-
-    @discord.ui.button(label="Utiliser ce message", emoji="✅", style=discord.ButtonStyle.success)
-    async def b_use(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await set_setting(interaction.guild_id, "welcome_text", self.template)
-        await set_setting(interaction.guild_id, "welcome_mode", "texte")
-        await interaction.response.edit_message(
-            content="✅ Modèle enregistré (mode texte). Active l'accueil avec `/bienvenue config actif:True salon:#…`.",
-            embed=None, view=None,
-        )
-
-    @discord.ui.button(label="Annuler", emoji="❌", style=discord.ButtonStyle.secondary)
-    async def b_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Annulé 😏", embed=None, view=None)
-
-
-@bienvenue_group.command(name="generer", description="L'IA écrit un modèle de bienvenue à ton goût ✨")
-@app_commands.describe(ton="Ambiance voulue : chaleureux, gaming, drôle, sobre, e-girl…")
-@staff_only
-@ai_cd()
-async def bienvenue_generer(interaction: discord.Interaction, ton: app_commands.Range[str, 3, 200]):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    system = (
-        persona(False, await get_style(interaction.guild_id))
-        + f"\n\nTu écris un MODÈLE réutilisable de message de bienvenue (2 à 4 phrases). Utilise ces variables telles quelles : "
-        f"{WELCOME_VARS}. Pas de @everyone/@here, pas de lien. Réponds avec le message seul."
-    )
-    try:
-        tpl = await ask_ai([{"role": "user", "content": f"Ambiance voulue : {ton}"}], system=system, max_tokens=500)
-    except Exception as e:  # noqa: BLE001
-        return await interaction.followup.send(fail_msg(e), ephemeral=True)
-    tpl = tpl.strip().replace("@everyone", "everyone").replace("@here", "here")[:1000]
-    if not tpl:
-        return await interaction.followup.send("😅 Rien de généré, réessaie.", ephemeral=True)
-    preview = welcome_render(tpl, interaction.user)
-    e = emb(
-        "✨ Aperçu du message de bienvenue",
-        airy(["_Voilà ce que verront les nouveaux :_", quote_block(preview, 2500)]),
-        COLOR_PINK,
-    )
-    e.add_field(name="📝 Modèle enregistrable", value=f"{SP}\n```{tpl[:900]}```", inline=False)
-    await interaction.followup.send(embed=e, view=WelcomePreview(interaction.user.id, tpl), ephemeral=True)
-
-
-@bienvenue_group.command(name="tester", description="Voir à quoi ressemblera l'accueil (aperçu privé)")
-@staff_only
-@ai_cd()
-async def bienvenue_tester(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    text = await build_welcome(interaction.user)
-    await interaction.followup.send(
-        embed=emb("👋 Aperçu de l'accueil", airy(["_Voilà ce que verra un nouvel arrivant :_", quote_block(text)]), COLOR_PINK),
-        ephemeral=True,
-    )
-
-
-bot.tree.add_command(bienvenue_group)
-bot.tree.add_command(autorole_group)
 bot.tree.add_command(interdit_group)
-bot.tree.add_command(vocal_group)
 
+
+##############################################################################
+# PARTIE 23/34 · COMMUNAUTÉ
+# /sondage : sondages à boutons.
+# (ancien fichier : mika/communaute/sondage.py)
+##############################################################################
 
 # =====================================================================
 # 📊 /sondage : sondages interactifs à boutons (votes persistants, fin automatique)
@@ -7193,6 +7755,12 @@ async def sondage(
         raise
     await db_run("UPDATE polls SET message_id=? WHERE id=?", (msg.id, pid))
 
+
+##############################################################################
+# PARTIE 24/34 · COMMUNAUTÉ
+# /ticket : système de tickets d'assistance.
+# (ancien fichier : mika/communaute/tickets.py)
+##############################################################################
 
 # =====================================================================
 # 🎫 /ticket : système de tickets d'assistance (salon privé + transcript)
@@ -7577,6 +8145,12 @@ async def ticket_retirer(interaction: discord.Interaction, membre: discord.Membe
 
 bot.tree.add_command(ticket_group)
 
+
+##############################################################################
+# PARTIE 25/34 · ADMINISTRATION
+# /annonce, /purge, /supprimersalon et /role.
+# (ancien fichier : mika/admin/gestion.py)
+##############################################################################
 
 # =====================================================================
 # 📣 /annonce : publier une annonce (embed) avec mention optionnelle
@@ -7982,6 +8556,12 @@ async def role_supprimer(interaction: discord.Interaction, role: discord.Role):
 bot.tree.add_command(role_group)
 
 
+##############################################################################
+# PARTIE 26/34 · JEUX
+# /quizperso : quiz créés par les membres.
+# (ancien fichier : mika/jeux/quizperso.py)
+##############################################################################
+
 # =====================================================================
 # 🧠 QUIZ PERSO : /quizperso creer | jouer | liste | supprimer
 #   Les membres créent leurs quiz (1 bonne réponse + 1 à 3 mauvaises). Ils ne comptent pas dans le classement.
@@ -8102,6 +8682,12 @@ async def quizperso_supprimer(interaction: discord.Interaction, numero: int):
 
 bot.tree.add_command(quizperso_group)
 
+
+##############################################################################
+# PARTIE 27/34 · JEUX
+# /pfcduel : duel pierre-feuille-ciseaux.
+# (ancien fichier : mika/jeux/pfcduel.py)
+##############################################################################
 
 # =====================================================================
 # ✂️ /pfcduel : pierre-feuille-ciseaux contre un autre joueur (mise optionnelle)
@@ -8309,6 +8895,12 @@ async def pfcduel(
     view.message = await interaction.original_response()
 
 
+##############################################################################
+# PARTIE 28/34 · MODÉRATION
+# Types de logs et événements (arrivées, départs, messages, vocal).
+# (ancien fichier : mika/moderation/logs_events.py)
+##############################################################################
+
 # =====================================================================
 # ⚙️ CONFIG UNIFIÉ (/adminpanel) • 📜 TYPES DE LOGS • 🎯 KAHOOT • 🎮 PANEL /jeux
 #   Bloc inséré automatiquement par patch_mika.py, juste avant « RÉACTIONS AUX MESSAGES ».
@@ -8404,7 +8996,6 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    spawn(voice_auto_leave(member.guild))  # Mika quitte le vocal si elle y reste seule
     if member.bot or before.channel == after.channel:
         return
     if before.channel is None:
@@ -8417,6 +9008,12 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     e.timestamp = discord.utils.utcnow()
     await mod_log(member.guild, e, "vocal")
 
+
+##############################################################################
+# PARTIE 29/34 · CONFIGURATION
+# Fonctionnalités activables, /adminpanel (panneau de configuration).
+# (ancien fichier : mika/config/config_panel.py)
+##############################################################################
 
 # ---------------------------------------------------------------------
 # 🧩 Fonctionnalités activables / désactivables (une famille de commandes = un interrupteur)
@@ -8481,7 +9078,8 @@ CFG_TOGGLES = {
     "fonctions": [(k, label, d) for k, label, d, _ in FEATURES],
     "moderation": [("automod", "Auto-modération", False), ("automod_sanctions", "Sanctions auto", True)]
                   + [(k, label.split(" (")[0], d) for k, label, d in AM_RULES],
-    "economie": [("eco", "Économie", False), ("welcome_on", "Accueil", False), ("welcome_dm", "Accueil en MP", False)],
+    "economie": [("eco", "Économie", False), ("welcome_on", "Accueil", False), ("welcome_dm", "Accueil en MP", False),
+                 ("levels", "Niveaux", False), ("lvl_voice", "XP/argent en vocal", True)],
 }
 
 
@@ -8518,6 +9116,10 @@ async def cfg_embed(guild: discord.Guild, page: str) -> discord.Embed:
         lines.append("")
         for key, label in ECO_LABELS.items():
             lines.append(f"• {label} : **{await eco_cfg(gid, key)}** {COIN}")
+        lines.append(
+            f"📈 Niveaux : **{await lvl_cfg(gid, 'msg_xp')}** XP/message • vocal **{await lvl_cfg(gid, 'voc_xp')}** XP/min"
+            f" + **{await lvl_cfg(gid, 'voc_coins')}** {COIN}/min (détails : `/xp config`)"
+        )
         wc = await get_int(gid, "welcome_channel")
         mode = await get_setting(gid, "welcome_mode", "texte")
         lines.append(f"👋 Salon d'accueil : {f'<#{wc}>' if wc else '—'} • mode **{mode}** (détails : `/bienvenue config`)")
@@ -8690,6 +9292,7 @@ class ConfigPanel(_OwnerView):
             self.add_item(CfgAction("Couper les logs", "📜", S, 3, self._logs_off))
         elif page == "economie":
             self.add_item(CfgAction("Panel économie", "💰", P, 2, _h_ecopanel))
+            self.add_item(CfgAction("Réglages niveaux", "📈", P, 2, _h_levels))
             self.add_item(CfgAction("Détails de l'accueil", "👋", S, 2, _h_welcome))
         elif page == "outils":
             for label, emoji, style, row, h in (
@@ -8752,6 +9355,12 @@ async def adminpanel(
             await set_flag(interaction.guild_id, key, val)
     await open_config_panel(interaction, page.value if page else "general")
 
+
+##############################################################################
+# PARTIE 30/34 · JEUX
+# /kahoot : quiz live multi-joueurs.
+# (ancien fichier : mika/jeux/kahoot.py)
+##############################################################################
 
 # ---------------------------------------------------------------------
 # 🎯 /kahoot : quiz live multi-joueurs (créé à la main ou généré par l'IA)
@@ -9339,6 +9948,12 @@ async def kahoot_supprimer(interaction: discord.Interaction, numero: int):
 bot.tree.add_command(kahoot_group)
 
 
+##############################################################################
+# PARTIE 31/34 · JEUX
+# /jeux : panneau avec tous les jeux.
+# (ancien fichier : mika/jeux/jeux_panel.py)
+##############################################################################
+
 # ---------------------------------------------------------------------
 # 🎮 /jeux : panel avec TOUS les jeux (remplace l'ancien)
 # ---------------------------------------------------------------------
@@ -9511,6 +10126,12 @@ async def jeux(interaction: discord.Interaction, mise: app_commands.Range[int, 0
     await interaction.response.send_message(embed=e, view=view)
     view.message = await interaction.original_response()
 
+
+##############################################################################
+# PARTIE 32/34 · MODÉRATION
+# /regle : règles obligatoires à accepter.
+# (ancien fichier : mika/moderation/regle.py)
+##############################################################################
 
 # =====================================================================
 # 📜 /regle : règles du serveur à ACCEPTER pour rester (refus ou délai dépassé = expulsion)
@@ -9858,6 +10479,12 @@ async def regle_afficher(interaction: discord.Interaction, public: bool = False)
 
 bot.tree.add_command(regle_group)
 
+
+##############################################################################
+# PARTIE 33/34 · COMMUNAUTÉ
+# Giveaways (commande définie par GW_CMD).
+# (ancien fichier : mika/communaute/giveaway.py)
+##############################################################################
 
 # =====================================================================
 # 🎉 /givawayyy : giveaways à bouton (participation persistante, tirage automatique, relance possible)
@@ -10221,407 +10848,12 @@ async def gw_liste(interaction: discord.Interaction):
 
 bot.tree.add_command(giveaway_group)
 
-# =====================================================================
-# 🔗 /lien  +  🎵 /musique : musique en vocal réservée aux rôles choisis par un admin
-#   À COLLER dans bot.py tout en bas, juste AVANT la ligne  if __name__ == "__main__":
-#   (il doit venir après tout le reste : il utilise des éléments définis plus haut dans le fichier).
-#   Prérequis (pip) : yt-dlp  (en plus de PyNaCl, davey et imageio-ffmpeg déjà utilisés par /vocal)
-#   Rien d'autre à modifier : ce bloc s'enregistre tout seul (liste des commandes, interrupteur
-#   « Musique » dans /adminpanel, /test).
-# =====================================================================
 
-# ---------------------------------------------------------------------
-# 🔗 /lien
-# ---------------------------------------------------------------------
-music_staff = app_commands.checks.has_permissions(manage_guild=True)
-BOT_LINK = os.getenv("BOT_LINK", "https://github.com/MrMisteur/Bot-AI-Discord-Mika")
-
-
-@bot.tree.command(name="lien", description="Le lien du projet du bot 🔗")
-async def lien(interaction: discord.Interaction):
-    e = emb("🔗 Mon projet", f"Mon code source est ici :\n{BOT_LINK}", COLOR_PINK)
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="Ouvrir sur GitHub", emoji="🐙", style=discord.ButtonStyle.link, url=BOT_LINK))
-    await interaction.response.send_message(embed=e, view=view)
-
-
-# ---------------------------------------------------------------------
-# 🎵 /musique
-# ---------------------------------------------------------------------
-MUSIC_MAX_MIN = int(os.getenv("MUSIC_MAX_MIN", "60"))   # durée max d'un titre, en minutes
-MUSIC_MAX_QUEUE = 25
-MUSIC_MAX_ROLES = 25
-MUSIC_HOSTS = ("youtube.com", "youtu.be", "soundcloud.com", "bandcamp.com")  # liens acceptés (sinon : recherche)
-FFMPEG_STREAM = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", "options": "-vn"}
-
-
-class MusicState:
-    def __init__(self):
-        self.queue: deque = deque()
-        self.current: Optional[dict] = None
-        self.volume = 0.5
-        self.channel = None                 # salon texte où annoncer les titres
-        self.lock = asyncio.Lock()
-
-
-music_states: dict[int, MusicState] = {}
-
-
-def music_missing() -> Optional[str]:
-    missing = []
-    if ffmpeg_path() is None:
-        missing.append("ffmpeg (ajoute `imageio-ffmpeg` au requirements.txt)")
-    try:
-        import nacl  # noqa: F401
-    except ImportError:
-        missing.append("PyNaCl")
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
-        missing.append("yt-dlp")
-    return ", ".join(missing) or None
-
-
-def _ytdl_extract(query: str) -> Optional[dict]:
-    import yt_dlp
-    opts = {
-        "format": "bestaudio/best", "quiet": True, "no_warnings": True, "noplaylist": True,
-        "default_search": "ytsearch", "source_address": "0.0.0.0", "socket_timeout": 15,
-    }
-    with yt_dlp.YoutubeDL(opts) as y:
-        info = y.extract_info(query, download=False)
-    if info and info.get("entries"):
-        entries = [x for x in info["entries"] if x]
-        info = entries[0] if entries else None
-    return info
-
-
-def music_query(raw: str) -> Optional[str]:
-    """Lien accepté tel quel (hôtes autorisés) ou texte de recherche. None = lien refusé."""
-    raw = raw.strip()
-    if raw.lower().startswith(("http://", "https://")):
-        from urllib.parse import urlparse
-        host = (urlparse(raw).hostname or "").lower()
-        return raw if any(host == h or host.endswith("." + h) for h in MUSIC_HOSTS) else None
-    return f"ytsearch1:{raw}"
-
-
-def fmt_dur(sec) -> str:
-    if not sec:
-        return "?"
-    m, s = divmod(int(sec), 60)
-    h, m = divmod(m, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-# ---------- Rôles autorisés ----------
-async def music_role_ids(gid: int) -> set[int]:
-    raw = await get_setting(gid, "music_roles", "")
-    return {int(x) for x in raw.split(",") if x.strip().isdigit()}
-
-
-async def _save_music_roles(gid: int, ids: set[int]):
-    await set_setting(gid, "music_roles", ",".join(str(i) for i in sorted(ids)))
-
-
-async def music_check(interaction: discord.Interaction) -> bool:
-    """Staff (Gérer le serveur) ou membre ayant un des rôles autorisés. Sinon : refus avec explication."""
-    m = interaction.user
-    roles = await music_role_ids(interaction.guild_id)
-    if isinstance(m, discord.Member):
-        p = m.guild_permissions
-        if p.administrator or p.manage_guild or any(r.id in roles for r in m.roles):
-            return True
-    if roles:
-        txt = "🚫 La musique est réservée aux rôles : " + ", ".join(f"<@&{r}>" for r in sorted(roles)) + "."
-    else:
-        txt = "🚫 La musique est réservée au staff : aucun rôle n'est autorisé pour l'instant (`/musique autoriser`)."
-    await interaction.response.send_message(txt, ephemeral=True, allowed_mentions=NO_PINGS)
-    return False
-
-
-async def music_control(interaction: discord.Interaction):
-    """Pour skip / pause / stop / volume : renvoie (vc, état) ou None après avoir répondu l'erreur."""
-    if not await music_check(interaction):
-        return None
-    vc, st = interaction.guild.voice_client, music_states.get(interaction.guild_id)
-    if vc is None or not vc.is_connected() or st is None or (st.current is None and not st.queue):
-        await interaction.response.send_message("Je ne joue rien pour le moment 😏", ephemeral=True)
-        return None
-    voice = interaction.user.voice
-    if (voice is None or voice.channel is None or voice.channel.id != vc.channel.id) \
-            and not interaction.permissions.manage_guild:
-        await interaction.response.send_message(f"Viens dans {vc.channel.mention} pour contrôler la musique 😏", ephemeral=True)
-        return None
-    return vc, st
-
-
-# ---------- Lecture ----------
-async def music_advance(guild: discord.Guild):
-    """Lance le titre suivant si rien ne joue. Appelée à la fin de chaque titre."""
-    st = music_states.get(guild.id)
-    if st is None:
-        return
-    async with st.lock:
-        vc = guild.voice_client
-        if vc is None or not vc.is_connected():
-            music_states.pop(guild.id, None)
-            return
-        if vc.is_playing() or vc.is_paused():
-            return
-        while st.queue:
-            track = st.queue.popleft()
-            try:
-                if time.time() - track["at"] > 600:  # le lien de streaming expire : on le renouvelle
-                    info = await asyncio.wait_for(asyncio.to_thread(_ytdl_extract, track["page"]), timeout=40)
-                    track["url"], track["at"] = info["url"], time.time()
-                src = discord.PCMVolumeTransformer(
-                    discord.FFmpegPCMAudio(track["url"], executable=ffmpeg_path() or "ffmpeg", **FFMPEG_STREAM),
-                    volume=st.volume,
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning("Musique : lecture impossible (%r)", e)
-                await _music_say(st, f"😅 Impossible de lire **{track['title'][:80]}**, je passe au suivant.")
-                continue
-
-            def _after(err, g=guild):
-                if err:
-                    log.warning("Musique : erreur de lecture (%r)", err)
-                asyncio.run_coroutine_threadsafe(music_advance(g), bot.loop)
-
-            st.current = track
-            vc.play(src, after=_after)
-            e = emb("🎶 Je joue", f"**[{track['title'][:150]}]({track['page']})**\n⏱️ {fmt_dur(track['duration'])} • demandé par <@{track['by']}>", COLOR_PURPLE)
-            await _music_say(st, embed=e)
-            return
-        st.current = None
-
-
-async def _music_say(st: MusicState, text: Optional[str] = None, embed: Optional[discord.Embed] = None):
-    if st.channel is None:
-        return
-    try:
-        await st.channel.send(text, embed=embed, allowed_mentions=NO_PINGS)
-    except discord.HTTPException:
-        pass
-
-
-# ---------- Commandes ----------
-musique_group = app_commands.Group(name="musique", description="Musique en vocal 🎵", guild_only=True)
-
-
-@musique_group.command(name="jouer", description="Joue un titre (recherche ou lien YouTube / SoundCloud / Bandcamp) 🎶")
-@app_commands.describe(titre="Un titre à chercher, ou un lien")
-@app_commands.checks.cooldown(1, 3.0, key=lambda i: i.user.id)
-async def musique_jouer(interaction: discord.Interaction, titre: app_commands.Range[str, 2, 200]):
-    if not await music_check(interaction):
-        return
-    missing = music_missing()
-    if missing:
-        return await interaction.response.send_message(
-            f"🔧 Je ne peux pas jouer de musique : il manque sur l'hébergement **{missing}**.", ephemeral=True
-        )
-    guild, voice = interaction.guild, interaction.user.voice
-    if voice is None or voice.channel is None:
-        return await interaction.response.send_message("Rejoins d'abord un salon vocal, petit chat 😏", ephemeral=True)
-    ch = voice.channel
-    if await channel_banned(ch, guild.id):
-        return await interaction.response.send_message("🚫 Je n'ai pas le droit de venir dans ce vocal.", ephemeral=True)
-    query = music_query(titre)
-    if query is None:
-        return await interaction.response.send_message(
-            "🔗 Lien non accepté : YouTube, SoundCloud ou Bandcamp seulement (ou tape juste le titre).", ephemeral=True
-        )
-    st = music_states.get(guild.id)
-    if st is not None and len(st.queue) >= MUSIC_MAX_QUEUE:
-        return await interaction.response.send_message(f"🎵 La file est pleine ({MUSIC_MAX_QUEUE} titres max).", ephemeral=True)
-
-    await interaction.response.defer(thinking=True, ephemeral=True)
-    vc = guild.voice_client
-    if vc is not None and not vc.is_connected():
-        music_states.pop(guild.id, None)
-        try:
-            await vc.disconnect(force=True)
-        except Exception:  # noqa: BLE001
-            pass
-        vc = None
-    try:
-        if vc is None:
-            perms = ch.permissions_for(guild.me)
-            if not (perms.connect and perms.speak):
-                return await interaction.followup.send(f"🚫 Il me faut « Se connecter » et « Parler » dans {ch.mention}.", ephemeral=True)
-            await ch.connect(timeout=20, self_deaf=True)
-        elif vc.channel.id != ch.id:
-            if vc.is_playing() or vc.is_paused():
-                return await interaction.followup.send(f"Je joue déjà dans {vc.channel.mention}, viens m'y rejoindre 😏", ephemeral=True)
-            await vc.move_to(ch)
-    except (asyncio.TimeoutError, discord.ClientException, discord.HTTPException) as e:
-        log.warning("Musique : connexion impossible (%r)", e)
-        return await interaction.followup.send("😅 Je n'arrive pas à me connecter au vocal, réessaie dans un instant.", ephemeral=True)
-
-    try:
-        info = await asyncio.wait_for(asyncio.to_thread(_ytdl_extract, query), timeout=40)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Musique : recherche impossible (%r)", e)
-        return await interaction.followup.send("😅 Je n'ai pas réussi à récupérer ce titre (introuvable, privé ou bloqué).", ephemeral=True)
-    if not info or not info.get("url"):
-        return await interaction.followup.send("🤷 Je n'ai rien trouvé.", ephemeral=True)
-    if info.get("is_live") or (info.get("duration") or 0) > MUSIC_MAX_MIN * 60:
-        return await interaction.followup.send(f"⏱️ Pas de direct ni de titre de plus de {MUSIC_MAX_MIN} min.", ephemeral=True)
-
-    st = music_states.setdefault(guild.id, MusicState())
-    st.channel = interaction.channel
-    track = {
-        "title": info.get("title") or "Titre inconnu", "page": info.get("webpage_url") or titre,
-        "duration": info.get("duration"), "url": info["url"], "at": time.time(), "by": interaction.user.id,
-    }
-    st.queue.append(track)
-    busy = st.current is not None
-    await interaction.followup.send(
-        f"➕ **{track['title'][:100]}** ajouté" + (f" (position {len(st.queue)})." if busy else " : je lance ça."), ephemeral=True
-    )
-    await music_advance(guild)
-
-
-@musique_group.command(name="passer", description="Passe au titre suivant ⏭️")
-async def musique_passer(interaction: discord.Interaction):
-    ctl = await music_control(interaction)
-    if ctl is None:
-        return
-    vc, st = ctl
-    title = st.current["title"][:80] if st.current else "le titre"
-    vc.stop()  # la fin du titre déclenche automatiquement le suivant
-    await interaction.response.send_message(f"⏭️ **{title}** passé.", allowed_mentions=NO_PINGS)
-
-
-@musique_group.command(name="pause", description="Met la musique en pause ⏸️")
-async def musique_pause(interaction: discord.Interaction):
-    ctl = await music_control(interaction)
-    if ctl is None:
-        return
-    vc, _ = ctl
-    if not vc.is_playing():
-        return await interaction.response.send_message("Rien ne joue en ce moment 😏", ephemeral=True)
-    vc.pause()
-    await interaction.response.send_message("⏸️ Musique en pause. `/musique reprendre` pour continuer.")
-
-
-@musique_group.command(name="reprendre", description="Reprend la musique ▶️")
-async def musique_reprendre(interaction: discord.Interaction):
-    ctl = await music_control(interaction)
-    if ctl is None:
-        return
-    vc, _ = ctl
-    if not vc.is_paused():
-        return await interaction.response.send_message("La musique n'est pas en pause 😏", ephemeral=True)
-    vc.resume()
-    await interaction.response.send_message("▶️ C'est reparti.")
-
-
-@musique_group.command(name="stop", description="Arrête la musique et vide la file ⏹️")
-async def musique_stop(interaction: discord.Interaction):
-    ctl = await music_control(interaction)
-    if ctl is None:
-        return
-    vc, st = ctl
-    st.queue.clear()
-    vc.stop()
-    await interaction.response.send_message("⏹️ Musique arrêtée, file vidée. (`/vocal quitter` pour me renvoyer.)")
-
-
-@musique_group.command(name="volume", description="Règle le volume (1 à 100) 🔊")
-@app_commands.describe(niveau="Volume en pourcentage (50 par défaut)")
-async def musique_volume(interaction: discord.Interaction, niveau: app_commands.Range[int, 1, 100]):
-    ctl = await music_control(interaction)
-    if ctl is None:
-        return
-    vc, st = ctl
-    st.volume = niveau / 100
-    if isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = st.volume
-    await interaction.response.send_message(f"🔊 Volume : **{niveau}%**")
-
-
-@musique_group.command(name="file", description="Voir le titre en cours et la file d'attente 📜")
-async def musique_file(interaction: discord.Interaction):
-    st = music_states.get(interaction.guild_id)
-    if st is None or (st.current is None and not st.queue):
-        return await interaction.response.send_message("La file est vide. `/musique jouer` 😏", ephemeral=True)
-    lines = []
-    if st.current:
-        lines.append(f"🎶 **En cours :** [{st.current['title'][:80]}]({st.current['page']}) • {fmt_dur(st.current['duration'])}")
-    for i, t in enumerate(list(st.queue)[:10], 1):
-        lines.append(f"`{i}.` {t['title'][:70]} • {fmt_dur(t['duration'])} • <@{t['by']}>")
-    if len(st.queue) > 10:
-        lines.append(f"_… et {len(st.queue) - 10} autre(s)_")
-    await interaction.response.send_message(
-        embed=emb("📜 File d'attente", "\n".join(lines)[:4000], COLOR_PURPLE), allowed_mentions=NO_PINGS
-    )
-
-
-# ---------- Gestion des rôles autorisés (staff : Gérer le serveur) ----------
-@musique_group.command(name="autoriser", description="(staff) Autorise un rôle à utiliser la musique 🎀")
-@app_commands.describe(role="Le rôle autorisé (il peut jouer, passer, mettre en pause…)")
-@music_staff
-async def musique_autoriser(interaction: discord.Interaction, role: discord.Role):
-    gid = interaction.guild_id
-    ids = await music_role_ids(gid)
-    if role.id in ids:
-        return await interaction.response.send_message(f"😏 {role.mention} est déjà autorisé.", ephemeral=True, allowed_mentions=NO_PINGS)
-    if len(ids) >= MUSIC_MAX_ROLES:
-        return await interaction.response.send_message(f"🚫 {MUSIC_MAX_ROLES} rôles maximum.", ephemeral=True)
-    ids.add(role.id)
-    await _save_music_roles(gid, ids)
-    note = " ⚠️ C'est @everyone : tout le monde pourra mettre de la musique." if role.is_default() else ""
-    await interaction.response.send_message(f"🎵 {role.mention} peut maintenant utiliser la musique.{note}", ephemeral=True, allowed_mentions=NO_PINGS)
-
-
-@musique_group.command(name="interdire", description="(staff) Retire l'accès à la musique à un rôle ✂️")
-@app_commands.describe(role="Le rôle à retirer de la liste")
-@music_staff
-async def musique_interdire(interaction: discord.Interaction, role: discord.Role):
-    gid = interaction.guild_id
-    ids = await music_role_ids(gid)
-    if role.id not in ids:
-        return await interaction.response.send_message(f"😏 {role.mention} n'était pas autorisé.", ephemeral=True, allowed_mentions=NO_PINGS)
-    ids.discard(role.id)
-    await _save_music_roles(gid, ids)
-    await interaction.response.send_message(f"✂️ {role.mention} n'a plus accès à la musique.", ephemeral=True, allowed_mentions=NO_PINGS)
-
-
-@musique_group.command(name="permissions", description="Voir quels rôles peuvent mettre de la musique 🔑")
-async def musique_permissions(interaction: discord.Interaction):
-    ids = await music_role_ids(interaction.guild_id)
-    txt = ("\n".join(f"• <@&{r}>" for r in sorted(ids)) if ids else "Aucun rôle : seul le staff peut mettre de la musique.")
-    txt += "\n\n_Le staff (permission « Gérer le serveur ») peut toujours l'utiliser._"
-    await interaction.response.send_message(
-        embed=emb("🔑 Rôles autorisés pour la musique", txt, COLOR_PINK), ephemeral=True, allowed_mentions=NO_PINGS
-    )
-
-
-bot.tree.add_command(musique_group)
-
-
-# ---------- Cohabitation avec la voix de /vocal (un seul son à la fois) ----------
-_tts_speak_base = tts_speak
-
-
-async def tts_speak(guild: discord.Guild, text: str) -> bool:  # noqa: F811 : remplace la version de /vocal
-    vc = guild.voice_client
-    if vc is not None and vc.is_connected() and (vc.is_playing() or vc.is_paused()):
-        return False  # la musique joue : je ne parle pas par-dessus
-    ok = await _tts_speak_base(guild, text)
-    spawn(music_advance(guild))  # reprend la file si des titres attendaient pendant que je parlais
-    return ok
-
-
-# ---------- Enregistrement auprès du reste du bot (aucune autre modification à faire) ----------
-EXPECTED_COMMANDS.update({"lien", "musique"})
-REMOVED_COMMANDS.difference_update({"musique", "stat"})  # ces deux commandes existent bien (« stat » aussi)
-FEATURES.append(("f_musique", "Musique", True, {"musique"}))
-_CMD_FEATURE["musique"] = "f_musique"
-CFG_TOGGLES["fonctions"].append(("f_musique", "Musique", True))
-
+##############################################################################
+# PARTIE 34/34 · NOYAU
+# Réactions aux messages, gestionnaire principal on_message et on_ready.
+# (ancien fichier : mika/noyau/messages.py)
+##############################################################################
 
 # =====================================================================
 # RÉACTIONS AUX MESSAGES
@@ -10658,6 +10890,8 @@ async def on_message(message: discord.Message):
         return
     if message.guild and await channel_banned(message.channel, message.guild.id):
         return  # salon interdit (/interdit) : ni réponse, ni réaction, ni !commande
+    if message.guild:
+        spawn(lvl_on_message(message))  # XP de niveau (si les niveaux sont activés)
     if message.guild and await is_silenced(message.guild.id):
         return
     nsfw = is_nsfw(message.channel)
@@ -10809,7 +11043,10 @@ async def on_ready():
     log.info("✅ Connecté en tant que %s", bot.user)
 
 
+##############################################################################
+# LANCEMENT
+##############################################################################
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not AI_API_KEY:
-        raise SystemExit("DISCORD_TOKEN et AI_API_KEY doivent être définis (voir .env.example)")
+        raise SystemExit("DISCORD_TOKEN et AI_API_KEY doivent être définis (voir le modèle .env en haut du fichier)")
     bot.run(DISCORD_TOKEN, log_handler=None)
