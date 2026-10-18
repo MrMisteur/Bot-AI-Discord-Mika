@@ -358,8 +358,6 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - **`/dev projet` renvoie des fichiers coupés** : baisse `DEV_MAX_TOKENS` si ton modèle limite la taille de sortie.
 - **Erreurs d'IA** : vérifie `AI_BASE_URL`, `AI_MODEL` et ta clé ; les limites de débit des offres gratuites peuvent être atteintes.
 - **`RuntimeError: davey library needed in order to use voice`** : ajoute `davey` (et `PyNaCl`) à `requirements.txt`, ou utilise `discord.py[voice]`, puis redémarre. Vérifie qu'aucune ligne du fichier ne contient `pip install`. Si pip répond `No matching distribution found for davey`, il n'y a pas de version compatible avec ton Python : passe sur 3.12 ou 3.13 (sur un panel Pterodactyl : onglet *Startup*, image Docker `python_3.12` ou `python_3.13`).
-- **`/musique` ne trouve rien ou échoue** : installe `yt-dlp` et mets-le à jour régulièrement (`pip install -U yt-dlp`). YouTube bloque parfois les adresses d'hébergeurs : essaie un lien SoundCloud.
-- **`/vocal` dit qu'il manque quelque chose** : il lui faut `PyNaCl`, `edge-tts` et `imageio-ffmpeg` (ou ffmpeg installé sur la machine).
 - **Les règles n'expulsent personne** : le texte et le salon doivent être définis (`/regle serveur`), et le bot doit avoir « Expulser des membres » avec un rôle au-dessus du nouveau.
 - **`/niveau` répond que les niveaux ne sont pas activés** : lance `/xp config actif:True` (ou active **Niveaux** dans `/adminpanel` › *Économie & accueil*).
 - **Personne ne gagne d'XP en vocal** : vérifie que `vocal` est activé dans `/xp config`, que les membres n'ont pas le casque coupé, ne sont pas dans le salon AFK, et qu'ils sont assez nombreux dans le salon (`membres_min`, 2 par défaut).
