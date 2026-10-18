@@ -19,7 +19,6 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 ## Fonctionnalités
 
 - **Chat IA** : répond aux mentions, aux réponses à ses messages et quand on écrit son prénom ; rebonds spontanés et réactions emoji aléatoires ; mémoire par salon (SQLite) ; mode « protectrice » automatique si quelqu'un semble aller mal.
-- **Voix** : `/vocal` : Mika rejoint ton salon vocal et parle à voix haute (synthèse vocale).
 - **Social** : mariage (jusqu'à 3 par mariage), compatibilité, roast, blagues, 8ball, actions (`/kiss`, `/hug`, `/pat`, `/slap`, `/bonk`, `/gift`).
 - **Jeux** : pierre-feuille-ciseaux (et duel), quiz, blackjack et poker multi-joueurs, quiz créés par les membres, **Kahoot** (quiz live multi-joueurs, créés à la main ou par l'IA), classements et stats.
 - **Économie** : solde, bonus quotidien, dons, classement des plus riches, mises sur les jeux.
@@ -36,27 +35,23 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 
 ## Prérequis
 
-- Python **3.10 ou plus** (3.12 ou 3.13 recommandé pour la voix, voir [Dépannage](#dépannage))
+- Python **3.10 ou plus**
 - Un bot Discord (token) créé sur le [Developer Portal](https://discord.com/developers/applications)
 - Une clé API pour un service compatible OpenAI (par défaut : [Groq](https://console.groq.com), gratuit)
 
 Dépendances Python utilisées par `bot.py` :
 
 ```
-discord.py[voice]
-davey
-PyNaCl
+discord.py
 aiosqlite
 httpx
 openai
 ddgs
 python-dotenv
-edge-tts
-imageio-ffmpeg
 psutil
 ```
 
-> `edge-tts`, `imageio-ffmpeg`, `PyNaCl` et `davey` ne servent qu'à la voix (`/vocal`). `psutil` est optionnel (affiche la RAM dans `/optimiser`). `imageio-ffmpeg` fournit ffmpeg tout seul : rien d'autre à installer.
+> `psutil` est optionnel (affiche la RAM dans `/optimiser`).
 >
 > Le système de niveaux n'ajoute **aucune dépendance**.
 
@@ -106,7 +101,6 @@ Au premier démarrage, les commandes slash se synchronisent automatiquement. Ell
 | `SPONTANEOUS_CHANCE` | `0.03` | Probabilité de rebondir sans être appelé |
 | `PHRASE_CHANCE` | `0.60` | Probabilité d'une phrase « mommy » sur câlin/bisou |
 | `NAME_TRIGGER` | `1` | `1` : répond aussi quand on écrit son prénom ; `0` : désactivé |
-| `MIKA_VOICE` | `fr-FR-DeniseNeural` | Voix utilisée par `/vocal` |
 | `BOT_LINK` | lien GitHub du projet | Lien affiché par `/lien` |
 | `DEV_MAX_TOKENS` | `8000` | Taille max de sortie de `/dev projet` (à baisser si ton modèle limite) |
 | `SYNC_ON_START` | *(vide)* | `1` : force la resynchronisation des commandes à chaque démarrage |
@@ -186,7 +180,7 @@ Dans le **Developer Portal → Bot → Privileged Gateway Intents**, active :
 - **Server Members Intent**
 - **Presence Intent**
 
-Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. Donne-lui les permissions dont tu as besoin selon les fonctions utilisées : gérer les rôles (dont les rôles-récompenses de niveau), gérer les salons, gérer les messages, gérer les webhooks (`/envoyer` sous pseudo), expulser / bannir, exclure des membres (mute), rendre muets / sourdine (vocal), gérer les emojis, voir les salons, envoyer des messages, intégrer des liens, ajouter des réactions, utiliser les emojis externes, se connecter et parler (`/vocal`). Le plus simple est de lui donner **Administrateur** sur un serveur de confiance.
+Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. Donne-lui les permissions dont tu as besoin selon les fonctions utilisées : gérer les rôles (dont les rôles-récompenses de niveau), gérer les salons, gérer les messages, gérer les webhooks (`/envoyer` sous pseudo), expulser / bannir, exclure des membres (mute), rendre muets / sourdine (vocal), gérer les emojis, voir les salons, envoyer des messages, intégrer des liens, ajouter des réactions, utiliser les emojis externes. Le plus simple est de lui donner **Administrateur** sur un serveur de confiance.
 
 > Le rôle du bot doit être placé **au-dessus** des rôles qu'il doit gérer ou sanctionner.
 
@@ -206,15 +200,6 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/choisir` | Tranche entre plusieurs options |
 | `/meteo` | Météo d'une ville |
 | `/reset` | Efface la mémoire du salon |
-
-### 🎙️ Vocal
-
-| Commande | Description |
-| --- | --- |
-| `/vocal rejoindre` | Mika rejoint ton salon vocal |
-| `/vocal dire` | Mika dit un texte à voix haute |
-| `/vocal ask` | Pose une question, Mika répond à voix haute (et par écrit) |
-| `/vocal quitter` | Mika quitte le vocal (elle part aussi seule s'il n'y a plus personne) |
 
 ### 💋 Social
 
@@ -367,8 +352,6 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - **Il ne peut pas sanctionner ou gérer un rôle** : place le rôle du bot au-dessus des rôles concernés et vérifie ses permissions.
 - **`/dev projet` renvoie des fichiers coupés** : baisse `DEV_MAX_TOKENS` si ton modèle limite la taille de sortie.
 - **Erreurs d'IA** : vérifie `AI_BASE_URL`, `AI_MODEL` et ta clé ; les limites de débit des offres gratuites peuvent être atteintes.
-- **`RuntimeError: davey library needed in order to use voice`** : ajoute `davey` (et `PyNaCl`) à `requirements.txt`, ou utilise `discord.py[voice]`, puis redémarre. Vérifie qu'aucune ligne du fichier ne contient `pip install`. Si pip répond `No matching distribution found for davey`, il n'y a pas de version compatible avec ton Python : passe sur 3.12 ou 3.13 (sur un panel Pterodactyl : onglet *Startup*, image Docker `python_3.12` ou `python_3.13`).
-- **`/vocal` dit qu'il manque quelque chose** : il lui faut `PyNaCl`, `edge-tts` et `imageio-ffmpeg` (ou ffmpeg installé sur la machine).
 - **Les règles n'expulsent personne** : le texte et le salon doivent être définis (`/regle serveur`), et le bot doit avoir « Expulser des membres » avec un rôle au-dessus du nouveau.
 - **`/niveau` répond que les niveaux ne sont pas activés** : lance `/xp config actif:True` (ou active **Niveaux** dans `/adminpanel` › *Économie & accueil*).
 - **Personne ne gagne d'XP en vocal** : vérifie que `vocal` est activé dans `/xp config`, que les membres n'ont pas le casque coupé, ne sont pas dans le salon AFK, et qu'ils sont assez nombreux dans le salon (`membres_min`, 2 par défaut).
@@ -381,7 +364,6 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - [discord.py](https://github.com/Rapptz/discord.py)
 - [Open-Meteo](https://open-meteo.com/) — météo gratuite sans clé
 - [ddgs](https://pypi.org/project/ddgs/) — recherche DuckDuckGo
-- [edge-tts](https://github.com/rany2/edge-tts) — synthèse vocale
 - [Groq](https://groq.com/) — IA par défaut
 - [Claude](https://claude.ai/new) — IA pour le code
 
