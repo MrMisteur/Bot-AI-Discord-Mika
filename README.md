@@ -215,18 +215,6 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/vocal ask` | Pose une question, Mika répond à voix haute (et par écrit) |
 | `/vocal quitter` | Mika quitte le vocal (elle part aussi seule s'il n'y a plus personne) |
 
-### 🎵 Musique
-
-| Commande | Description |
-| --- | --- |
-| `/musique jouer` | Joue un titre (recherche ou lien YouTube / SoundCloud / Bandcamp) |
-| `/musique passer\|pause\|reprendre\|stop\|volume` | Contrôle la lecture |
-| `/musique file` | Titre en cours et file d'attente (pour tout le monde) |
-| `/musique autoriser` / `interdire` *(staff)* | Choisit les rôles qui peuvent mettre de la musique |
-| `/musique permissions` | Voir les rôles autorisés |
-
-> Le staff (permission « Gérer le serveur ») peut toujours utiliser la musique. Sans aucun rôle autorisé, elle est réservée au staff.
-
 ### 💋 Social
 
 | Commande | Description |
