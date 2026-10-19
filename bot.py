@@ -18,8 +18,8 @@
 #   12. [MODÉRATION    ] Modération : /punition panel|deban, mute vocal, casque, rôles, fin automatique des sanctions vocales.
 #   13. [ADMINISTRATION] /test : auto-diagnostic du bot.
 #   14. [ADMINISTRATION] Éléments du panneau admin (silence, envoi, commandes perso, sélecteurs) réutilisés par /adminpanel.
-#   15. [JEUX          ] Économie : /solde, /daily, /donner, /richesse, /eco, /ecopanel et fonctions de mise.
-#   15b.[COMMUNAUTÉ    ] Niveaux : XP chat + vocal, argent en vocal, rôles-récompenses (/niveau, /topniveaux, /xp, /recompense).
+#   15. [JEUX          ] Économie : /solde, /daily (série), /travail, /crime, /boutique, /donner, /richesse, /eco, /ecopanel et mises.
+#   15b.[COMMUNAUTÉ    ] Niveaux : XP chat + vocal + JEUX, boosts, événements XP, rôles-récompenses (/niveau, /topniveaux, /xp, /recompense).
 #   16. [JEUX          ] /reglepoker, /regleblackjack et /main.
 #   17. [ADMINISTRATION] /creersalon, /info et /creeserveur (serveur généré par l'IA).
 #   18. [MODÉRATION    ] Auto-modération et /automod.
@@ -559,6 +559,23 @@ CREATE TABLE IF NOT EXISTS level_rewards (
     guild_id INTEGER NOT NULL, role_id INTEGER NOT NULL, level INTEGER NOT NULL,
     PRIMARY KEY (guild_id, role_id));
 CREATE INDEX IF NOT EXISTS idx_level_rewards ON level_rewards(guild_id, level);
+CREATE TABLE IF NOT EXISTS game_xp (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, day TEXT NOT NULL DEFAULT '',
+    xp_today INTEGER NOT NULL DEFAULT 0, streak INTEGER NOT NULL DEFAULT 0,
+    best_streak INTEGER NOT NULL DEFAULT 0, total_xp INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS eco_profile (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, daily_streak INTEGER NOT NULL DEFAULT 0,
+    best_daily INTEGER NOT NULL DEFAULT 0, last_work INTEGER NOT NULL DEFAULT 0,
+    last_crime INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS shop_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+    price INTEGER NOT NULL, kind TEXT NOT NULL, role_id INTEGER NOT NULL DEFAULT 0,
+    mult_pct INTEGER NOT NULL DEFAULT 100, minutes INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_shop_items ON shop_items(guild_id);
+CREATE TABLE IF NOT EXISTS user_boosts (
+    guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, mult_pct INTEGER NOT NULL,
+    until INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id));
 """
 
 
@@ -748,21 +765,31 @@ _UPSERT = (
 )
 
 
-async def record_many(guild_id: Optional[int], game: str, outcomes: dict):
-    """outcomes : {user_id: 'win' | 'draw' | 'loss'}. Ignore les DM et les bots (id <= 0)."""
+async def record_many(
+    guild_id: Optional[int], game: str, outcomes: dict, *, bet: int = 0, channel=None, solo: bool = False, skip=frozenset(),
+) -> dict:
+    """outcomes : {user_id: 'win' | 'draw' | 'loss'}. Ignore les DM et les bots (id <= 0).
+    Enregistre les stats ET distribue l'XP de la partie (voir game_rewards). Renvoie {user_id: gains}.
+      bet     : mise de la partie (bonus d'XP)       channel : salon où poster le récap / les montées de niveau
+      solo    : partie gratuite contre le bot (XP réduite + anti-spam)       skip : joueurs sans XP (ex. AFK)"""
     if not guild_id or game not in GAMES:
-        return
+        return {}
     rows = [
         (guild_id, uid, game, int(r == "win"), int(r == "draw"), int(r == "loss"), POINTS[r])
         for uid, r in outcomes.items() if uid > 0 and r in POINTS
     ]
     if not rows:
-        return
+        return {}
     try:
         await bot.db.executemany(_UPSERT, rows)
         await bot.db.commit()
     except Exception:  # noqa: BLE001
         log.exception("Enregistrement des stats échoué")
+    try:
+        return await game_rewards(guild_id, game, outcomes, bet=bet, channel=channel, solo=solo, skip=skip)
+    except Exception:  # noqa: BLE001 : une erreur de récompense ne doit jamais casser une partie
+        log.exception("Récompenses de jeu échouées")
+        return {}
 
 
 async def leaderboard(guild_id: int, game: Optional[str] = None) -> list:
@@ -1703,8 +1730,9 @@ async def pfc(interaction: discord.Interaction, choix: app_commands.Choice[str])
         res, outcome = "Tu gagnes… j'ai laissé faire, t'es mignon", "win"
     else:
         res, outcome = f"Perdu ! {BOT_NAME} gagne. Sois bon perdant 😈", "loss"
-    await interaction.response.send_message(f"{PFC[mine]} vs {PFC[theirs]} — {res}")
-    spawn(record_many(interaction.guild_id, "pfc", {interaction.user.id: outcome}))
+    gains = await record_many(interaction.guild_id, "pfc", {interaction.user.id: outcome}, solo=True)
+    tag = xp_tag(gains.get(interaction.user.id))
+    await interaction.response.send_message(f"{PFC[mine]} vs {PFC[theirs]} — {res}" + (f"\n{tag}" if tag else ""))
 
 
 @bot.tree.command(name="ship", description="Compatibilité entre deux personnes 💘")
@@ -1753,17 +1781,20 @@ class QuizButton(discord.ui.Button):
             return await interaction.response.send_message("T'as déjà tenté, laisse les autres jouer 😌", ephemeral=True)
         if not self.correct:
             view.rates.add(uid)
+            tag = ""
             if view.ranked:
-                spawn(record_many(interaction.guild_id, "quiz", {uid: "loss"}))
-            return await interaction.response.send_message("Raté 😏", ephemeral=True)
+                tag = xp_tag((await record_many(interaction.guild_id, "quiz", {uid: "loss"})).get(uid))
+            return await interaction.response.send_message("Raté 😏" + (f"\n{tag}" if tag else ""), ephemeral=True)
         view.done = True
+        tag = ""
         if view.ranked:
-            spawn(record_many(interaction.guild_id, "quiz", {uid: "win"}))
+            tag = xp_tag((await record_many(interaction.guild_id, "quiz", {uid: "win"})).get(uid))
         view.reveal()
         await interaction.response.edit_message(
             content=(
                 f"{view.header}\n\n🏆 {interaction.user.mention} a trouvé : **{view.bonne}**. Bon chat 😏"
-                f"\n_{view.anecdote}_"
+                + (f"\n{tag}" if tag else "")
+                + f"\n_{view.anecdote}_"
             ),
             view=view,
         )
@@ -1943,7 +1974,10 @@ class BJTable:
             outcomes = {
                 pid: ("win" if "🏆" in r else "draw" if "🤝" in r else "loss") for pid, r in self.results.items()
             }
-            spawn(record_many(self.guild_id, "blackjack", outcomes))
+            spawn(record_many(
+                self.guild_id, "blackjack", outcomes, bet=self.bet, skip=self.afk,
+                solo=len(self.ids) == 1 and not self.bet, channel=getattr(self.message, "channel", None),
+            ))
             if self.bet:
                 for pid, pay in payouts.items():
                     if pay:
@@ -2404,7 +2438,10 @@ class PokerGame:
                 outcomes[p] = "win" if len(self.winners) == 1 else "draw"
             else:
                 outcomes[p] = "loss"
-        spawn(record_many(self.guild_id, "poker", outcomes))
+        spawn(record_many(
+            self.guild_id, "poker", outcomes, bet=self.bet, skip=self.afk,
+            solo=len(self.ids) == 1 and not self.bet, channel=getattr(self.message, "channel", None),
+        ))
         if self.bet and self.guild_id:
             pot = self.pot  # ante + relances de tout le monde (Mika comprise)
             humans = [p for p in self.winners if p != MIKA_ID]
@@ -3051,15 +3088,18 @@ async def aide(interaction: discord.Interaction):
     embed.add_field(
         name="💰 Économie",
         value=(
-            "`/solde [@membre]` • `/daily` (bonus quotidien) • `/donner @membre montant` • `/richesse` (top 10).\n"
-            "Dans `/blackjack` et `/poker`, l'option `mise` te fait jouer des pièces (si l'économie est activée)."
+            "`/solde [@membre]` • `/daily` (bonus quotidien : la **série** fait grimper le bonus, jackpot toutes les semaines) "
+            "• `/travail` • `/crime` (risqué 😈) • `/donner @membre montant` • `/richesse` (top 10).\n"
+            "`/boutique` → dépense tes 🪙 : rôles et **boosts d'XP** ⚡.\n"
+            "Dans `/blackjack`, `/poker` et `/pfcduel`, l'option `mise` te fait jouer des pièces (si l'économie est activée)."
         ),
         inline=False,
     )
     embed.add_field(
         name="📈 Niveaux",
         value=(
-            "Tu gagnes de l'**XP** en discutant (1 message / minute) et en **vocal** (+ des 🪙 si l'économie est activée).\n"
+            "Tu gagnes de l'**XP** en discutant (1 message / minute), en **vocal** (+ des 🪙) et **à chaque partie** : "
+            "victoire, égalité… ou même défaite ✨ (bonus de mise, bonus de série de victoires 🔥, plafond quotidien).\n"
             "`/niveau [@membre]` → niveau, barre de progression, rang et temps en vocal.\n"
             "`/topniveaux [tri]` → le classement (par XP ou par temps en vocal).\n"
             "Certains niveaux débloquent des rôles 🎭 !"
@@ -4584,6 +4624,7 @@ EXPECTED_COMMANDS = {
     "creersalon", "creeserveur", "info", "automod",
     "optimiser", "dev", "bienvenue", "sondage", "ticket", "annonce", "purge", "kahoot", "jeux",
     "regle", GW_CMD, "autorole", "interdit", "lien", "niveau", "topniveaux", "xp", "recompense",
+    "travail", "crime", "boutique", "boutiqueadmin",
 }
 REMOVED_COMMANDS = {"gouts", "favori", "inventaire"}
 
@@ -4597,7 +4638,8 @@ async def _t_db() -> str:
     await db_run("DELETE FROM settings WHERE guild_id=-1 AND key='test'")
     assert rows and rows[0][0] == "ok", "relecture incorrecte"
     for table in ("history", "settings", "marriages", "marriage_members", "custom_cmds", "game_stats",
-                  "voice_timers", "economy", "automod_strikes", "giveaways", "giveaway_entries", "rules_pending"):
+                  "voice_timers", "economy", "automod_strikes", "giveaways", "giveaway_entries", "rules_pending",
+                  "game_xp", "eco_profile", "shop_items", "user_boosts"):
         await db_all(f"SELECT 1 FROM {table} LIMIT 1")
     return "lecture / écriture OK"
 
@@ -5058,6 +5100,12 @@ ECO_LABELS = {
     "start": "Solde de départ", "daily": "Bonus /daily", "min_bet": "Mise minimum", "max_bet": "Mise maximum",
 }
 ECO_MAX = 1_000_000_000
+# Réglages supplémentaires (modifiables avec /eco config) — hors fenêtre « Réglages » du panel (5 champs max)
+ECO_EXTRA = {
+    "work_min": 60, "work_max": 180,   # gain de /travail
+    "work_cd": 60, "crime_cd": 180,    # minutes entre deux /travail, deux /crime
+    "streak_pct": 10, "streak_max": 10,  # /daily : +x % par jour de série, jusqu'à y jours
+}
 
 
 async def eco_on(gid: Optional[int]) -> bool:
@@ -5065,11 +5113,12 @@ async def eco_on(gid: Optional[int]) -> bool:
 
 
 async def eco_cfg(gid: Optional[int], key: str) -> int:
-    raw = await get_setting(gid, f"eco_{key}", str(ECO_DEFAULTS[key]))
+    default = ECO_DEFAULTS[key] if key in ECO_DEFAULTS else ECO_EXTRA[key]
+    raw = await get_setting(gid, f"eco_{key}", str(default))
     try:
         return int(raw)
     except ValueError:
-        return ECO_DEFAULTS[key]
+        return default
 
 
 async def eco_balance(gid: int, uid: int) -> int:
@@ -5134,45 +5183,396 @@ async def collect_bets(gid: Optional[int], players: dict, bet: int) -> tuple[dic
     return paid, refused
 
 
+# ---------- Profil économique : série de /daily, délais de /travail et /crime ----------
+_PROF_COLS = ("daily_streak", "best_daily", "last_work", "last_crime")
+DAILY_KEEP = 172800  # la série de /daily continue si on réclame dans les 48 h
+CRIME_WIN_CHANCE = 0.55
+
+
+async def eco_prof_get(gid: int, uid: int) -> dict:
+    rows = await db_all(
+        "SELECT daily_streak, best_daily, last_work, last_crime FROM eco_profile WHERE guild_id=? AND user_id=?", (gid, uid)
+    )
+    return dict(zip(_PROF_COLS, rows[0])) if rows else dict.fromkeys(_PROF_COLS, 0)
+
+
+async def eco_prof_set(gid: int, uid: int, **cols):
+    cols = {k: int(v) for k, v in cols.items() if k in _PROF_COLS}
+    if not cols:
+        return
+    await bot.db.execute("INSERT OR IGNORE INTO eco_profile(guild_id,user_id) VALUES (?,?)", (gid, uid))
+    sets = ", ".join(f"{k}=?" for k in cols)  # noms de colonnes issus de la liste blanche ci-dessus
+    await bot.db.execute(f"UPDATE eco_profile SET {sets} WHERE guild_id=? AND user_id=?", (*cols.values(), gid, uid))
+    await bot.db.commit()
+
+
+async def eco_cd_claim(gid: int, uid: int, col: str, cd: int) -> int:
+    """Tente de lancer un délai (atomique). 0 = c'est bon ; sinon le timestamp où ce sera de nouveau possible."""
+    if col not in ("last_work", "last_crime"):
+        raise ValueError(col)
+    now = int(time.time())
+    await bot.db.execute("INSERT OR IGNORE INTO eco_profile(guild_id,user_id) VALUES (?,?)", (gid, uid))
+    cur = await bot.db.execute(
+        f"UPDATE eco_profile SET {col}=? WHERE guild_id=? AND user_id=? AND {col}<=?", (now, gid, uid, now - cd)
+    )
+    await bot.db.commit()
+    if cur.rowcount == 1:
+        return 0
+    rows = await db_all(f"SELECT {col} FROM eco_profile WHERE guild_id=? AND user_id=?", (gid, uid))
+    return (rows[0][0] if rows else now) + cd
+
+
+def daily_calc(prev: int, streak: int, now: int, base: int, step_pct: int, max_days: int) -> tuple[int, int]:
+    """(nouvelle série, montant). Série +1 si le dernier bonus date de moins de 48 h, sinon retour à 1.
+    Bonus : +step_pct % par jour de série (max_days jours) ; tous les 7 jours, jackpot de +3× le bonus de base."""
+    streak = 1 if prev <= 0 or now - prev > DAILY_KEEP else streak + 1
+    amount = base + base * min(streak - 1, max_days) * step_pct // 100
+    if streak % 7 == 0:
+        amount += base * 3
+    return streak, amount
+
+
+async def eco_level_bonus_pct(gid: int, uid: int) -> int:
+    """+1 % de gains (travail / crime) par niveau, max +50 % — seulement si les niveaux sont activés."""
+    if not await lvl_on(gid):
+        return 0
+    return min(lvl_progress((await lvl_get(gid, uid))[0])[0], 50)
+
+
+async def eco_action_xp(member: discord.Member, base: int, channel=None) -> int:
+    """XP (boosts compris) pour une action d'économie ; annonce la montée de niveau. Renvoie l'XP gagnée."""
+    gid = member.guild.id
+    if base <= 0 or not await lvl_on(gid):
+        return 0
+    old, new, gain = await lvl_gain(gid, member.id, base)
+    if new > old:
+        spawn(lvl_levelup(member, old, new, channel))
+    return gain
+
+
 @bot.tree.command(name="solde", description="Ton porte-monnaie 🪙")
 @app_commands.describe(membre="Voir le solde d'un autre (optionnel)")
 @app_commands.guild_only()
 async def solde(interaction: discord.Interaction, membre: Optional[discord.Member] = None):
-    if not await eco_on(interaction.guild_id):
+    gid = interaction.guild_id
+    if not await eco_on(gid):
         return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
     target = membre or interaction.user
     if target.bot:
         return await interaction.response.send_message("Les bots n'ont pas de porte-monnaie 🤖", ephemeral=True)
-    bal = await eco_balance(interaction.guild_id, target.id)
-    await interaction.response.send_message(
-        embed=emb(f"👛 {target.display_name}", f"**{bal}** {COIN}", COLOR_PINK)
-    )
+    bal = await eco_balance(gid, target.id)
+    rank = (await db_all("SELECT COUNT(*)+1 FROM economy WHERE guild_id=? AND balance>?", (gid, bal)))[0][0]
+    total = (await db_all("SELECT COUNT(*) FROM economy WHERE guild_id=?", (gid,)))[0][0]
+    prof = await eco_prof_get(gid, target.id)
+    last = (await db_all("SELECT last_daily FROM economy WHERE guild_id=? AND user_id=?", (gid, target.id)))[0][0]
+    alive = prof["daily_streak"] > 0 and time.time() - last <= DAILY_KEEP
+    e = emb(f"👛 {target.display_name}", f"**{lvl_n(bal)}** {COIN}", COLOR_PINK)
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.add_field(name="💰 Richesse", value=f"**#{rank}** / {total}", inline=True)
+    e.add_field(name="🔥 Série /daily", value=f"**{prof['daily_streak']}** jour(s)" if alive else "—", inline=True)
+    if prof["best_daily"]:
+        e.add_field(name="🏅 Record", value=f"**{prof['best_daily']}** jour(s)", inline=True)
+    if await lvl_on(gid):
+        e.add_field(name="📈 Niveau", value=f"**{lvl_progress((await lvl_get(gid, target.id))[0])[0]}**", inline=True)
+    bo = await boost_active(gid, target.id)
+    if bo:
+        e.add_field(name="⚡ Boost d'XP", value=f"**×{bo[0] / 100:g}** jusqu'à <t:{bo[1]}:R>", inline=True)
+    await interaction.response.send_message(embed=e)
 
 
-@bot.tree.command(name="daily", description="Récupère ton bonus quotidien 🎁")
+@bot.tree.command(name="daily", description="Récupère ton bonus quotidien : plus ta série est longue, plus il grimpe 🎁")
 @app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
     gid, uid = interaction.guild_id, interaction.user.id
     if not await eco_on(gid):
         return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
-    amount = await eco_cfg(gid, "daily")
+    base, step, maxd = await eco_cfg(gid, "daily"), await eco_cfg(gid, "streak_pct"), await eco_cfg(gid, "streak_max")
     now = int(time.time())
     await eco_balance(gid, uid)
+    prev = (await db_all("SELECT last_daily FROM economy WHERE guild_id=? AND user_id=?", (gid, uid)))[0][0]
+    prof = await eco_prof_get(gid, uid)
+    streak, amount = daily_calc(prev, prof["daily_streak"], now, base, step, maxd)
     cur = await bot.db.execute(
-        "UPDATE economy SET balance=balance+?, last_daily=? WHERE guild_id=? AND user_id=? AND last_daily<=?",
-        (amount, now, gid, uid, now - 86400),
+        "UPDATE economy SET balance=balance+?, last_daily=? WHERE guild_id=? AND user_id=? AND last_daily=? AND last_daily<=?",
+        (amount, now, gid, uid, prev, now - 86400),
     )
     await bot.db.commit()
     if cur.rowcount == 0:
         rows = await db_all("SELECT last_daily FROM economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        nxt = rows[0][0] + 86400
+        nxt = (rows[0][0] if rows else now) + 86400
         return await interaction.response.send_message(
-            f"⏳ Déjà récupéré, petit chat. Reviens <t:{nxt}:R> 😏", ephemeral=True
+            f"⏳ Déjà récupéré, petit chat. Reviens <t:{nxt}:R> 😏 (ta série est en jeu : reviens avant 48 h !)", ephemeral=True
         )
+    await eco_prof_set(gid, uid, daily_streak=streak, best_daily=max(prof["best_daily"], streak))
+    dxp = await lvl_cfg(gid, "daily_xp")
+    xp = await eco_action_xp(interaction.user, dxp + 5 * min(streak - 1, 10) if dxp > 0 else 0, interaction.channel)
     bal = await eco_balance(gid, uid)
-    await interaction.response.send_message(
-        embed=emb("🎁 Bonus quotidien", f"+**{amount}** {COIN} pour toi. Solde : **{bal}** {COIN}", COLOR_PINK)
+    lines = [f"+**{lvl_n(amount)}** {COIN} pour toi."]
+    if streak > 1:
+        lines.append(f"🔥 Série : **{streak}** jours (+{min(streak - 1, maxd) * step} % de bonus)")
+    else:
+        lines.append("🔥 Série lancée ! Reviens demain pour la faire grimper.")
+    lines.append("🎰 **JACKPOT de la semaine !**" if streak % 7 == 0 else f"🎰 Jackpot dans **{7 - streak % 7}** jour(s)")
+    if xp:
+        lines.append(f"✨ **+{lvl_n(xp)}** XP")
+    lines.append(f"Solde : **{lvl_n(bal)}** {COIN}")
+    await interaction.response.send_message(embed=emb("🎁 Bonus quotidien", "\n".join(lines), COLOR_PINK))
+
+
+# ---------- /travail et /crime ----------
+WORK_LINES = [
+    "🍸 Tu as servi des cocktails au Velvet Club toute la nuit : **{n}** {c} de pourboires.",
+    "💻 Tu as débuggé le site d'un client qui panique : **{n}** {c} sur ton compte.",
+    "🎨 Tu as vendu un portrait e-girl à un inconnu très généreux : **{n}** {c}.",
+    "📦 Tu as trié des colis jusqu'à l'aube : **{n}** {c}. Ton dos te déteste.",
+    "🎤 Tu as animé une soirée karaoké : **{n}** {c} et trois demandes en mariage.",
+    "🧹 Tu as fait le ménage chez un vampire (il paie bien) : **{n}** {c}.",
+    "📸 Tu as fait un shooting pour une marque gothique : **{n}** {c}.",
+    "🐱 Tu as gardé les chats d'un riche collectionneur : **{n}** {c}. Ils t'ont griffé, mais bon.",
+]
+CRIME_WIN_LINES = [
+    "🕶️ Tu as braqué un distributeur sans caméra… **+{n}** {c} ! Mommy est fière 😈",
+    "💎 Tu as revendu des bijoux « trouvés » au marché noir : **+{n}** {c}.",
+    "🎰 Tu as truqué une machine à sous du quartier : **+{n}** {c}. Ne reviens plus là-bas.",
+    "🚗 Tu as livré un colis louche sans poser de questions : **+{n}** {c}.",
+]
+CRIME_FAIL_LINES = [
+    "🚔 Les flics t'ont chopé en pleine action : amende de **{n}** {c}.",
+    "🐕 Un chien de garde t'a fait lâcher ton butin : **−{n}** {c}.",
+    "📹 Une caméra t'a filmé à visage découvert : **−{n}** {c} d'amende.",
+]
+
+
+async def _eco_range(gid: int) -> tuple[int, int]:
+    lo, hi = await eco_cfg(gid, "work_min"), await eco_cfg(gid, "work_max")
+    return (lo, hi) if lo <= hi else (hi, lo)
+
+
+@bot.tree.command(name="travail", description="Va bosser pour gagner des pièces 💼")
+@app_commands.guild_only()
+async def travail_cmd(interaction: discord.Interaction):
+    gid, uid = interaction.guild_id, interaction.user.id
+    if not await eco_on(gid):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    wait = await eco_cd_claim(gid, uid, "last_work", await eco_cfg(gid, "work_cd") * 60)
+    if wait:
+        return await interaction.response.send_message(f"⏳ Tu es épuisé, petit chat. Reviens <t:{wait}:R> 😏", ephemeral=True)
+    lo, hi = await _eco_range(gid)
+    bonus = await eco_level_bonus_pct(gid, uid)
+    gain = random.randint(lo, hi) * (100 + bonus) // 100
+    await eco_add(gid, uid, gain)
+    xp = await eco_action_xp(interaction.user, await lvl_cfg(gid, "work_xp"), interaction.channel)
+    lines = [random.choice(WORK_LINES).format(n=lvl_n(gain), c=COIN)]
+    if bonus:
+        lines.append(f"📈 Bonus de niveau : +{bonus} %")
+    if xp:
+        lines.append(f"✨ **+{lvl_n(xp)}** XP")
+    lines.append(f"Solde : **{lvl_n(await eco_balance(gid, uid))}** {COIN}")
+    await interaction.response.send_message(embed=emb("💼 Travail", "\n".join(lines), COLOR_PINK))
+
+
+@bot.tree.command(name="crime", description="Un coup risqué : gros gain… ou grosse amende 🕶️")
+@app_commands.guild_only()
+async def crime_cmd(interaction: discord.Interaction):
+    gid, uid = interaction.guild_id, interaction.user.id
+    if not await eco_on(gid):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    wait = await eco_cd_claim(gid, uid, "last_crime", await eco_cfg(gid, "crime_cd") * 60)
+    if wait:
+        return await interaction.response.send_message(f"🚔 Fais-toi oublier un moment… Reviens <t:{wait}:R> 😏", ephemeral=True)
+    lo, hi = await _eco_range(gid)
+    wxp = await lvl_cfg(gid, "work_xp")
+    if random.random() < CRIME_WIN_CHANCE:
+        bonus = await eco_level_bonus_pct(gid, uid)
+        gain = random.randint(lo * 2, max(lo * 2, hi * 3)) * (100 + bonus) // 100
+        await eco_add(gid, uid, gain)
+        xp = await eco_action_xp(interaction.user, wxp * 2, interaction.channel)
+        lines, title, color = [random.choice(CRIME_WIN_LINES).format(n=lvl_n(gain), c=COIN)], "🕶️ Coup réussi", COLOR_PINK
+    else:
+        bal = await eco_balance(gid, uid)
+        fine = min(bal, random.randint(max(1, hi // 2), max(1, hi)))
+        if fine > 0:
+            await eco_remove(gid, uid, fine)
+        xp = await eco_action_xp(interaction.user, wxp // 2, interaction.channel)  # même raté, on apprend
+        lines, title, color = [random.choice(CRIME_FAIL_LINES).format(n=lvl_n(fine), c=COIN)], "🚔 Coup raté", COLOR_DARK
+    if xp:
+        lines.append(f"✨ **+{lvl_n(xp)}** XP")
+    lines.append(f"Solde : **{lvl_n(await eco_balance(gid, uid))}** {COIN}")
+    await interaction.response.send_message(embed=emb(title, "\n".join(lines), color))
+
+
+# ---------- Boutique : rôles et boosts d'XP (puits à pièces) ----------
+SHOP_MAX_ITEMS = 25  # limite d'un menu déroulant Discord
+
+
+async def shop_items(gid: int) -> list[tuple]:
+    """[(id, nom, prix, type, id du rôle, multiplicateur %, minutes)]"""
+    return await db_all(
+        "SELECT id, name, price, kind, role_id, mult_pct, minutes FROM shop_items WHERE guild_id=? ORDER BY price, id", (gid,)
     )
+
+
+def shop_desc(kind: str, role_id: int, mult_pct: int, minutes: int) -> str:
+    if kind == "role":
+        return f"🎭 Rôle <@&{role_id}>"
+    return f"⚡ XP ×{mult_pct / 100:g} pendant {lvl_dur(minutes * 60)}"
+
+
+async def shop_buy(interaction: discord.Interaction, item_id: int):
+    gid, member = interaction.guild_id, interaction.user
+    rows = await db_all(
+        "SELECT name, price, kind, role_id, mult_pct, minutes FROM shop_items WHERE guild_id=? AND id=?", (gid, item_id)
+    )
+    if not rows:
+        return await interaction.response.send_message("🤔 Cet article n'existe plus.", ephemeral=True)
+    name, price, kind, role_id, mult, minutes = rows[0]
+    role = None
+    if kind == "role":
+        role = interaction.guild.get_role(role_id)
+        if role is None:
+            return await interaction.response.send_message("🤔 Le rôle de cet article a été supprimé.", ephemeral=True)
+        if role in member.roles:
+            return await interaction.response.send_message("😏 Tu as déjà ce rôle.", ephemeral=True)
+        if role >= interaction.guild.me.top_role or role.managed:
+            return await interaction.response.send_message("🚫 Je ne peux pas donner ce rôle (il est trop haut pour moi).", ephemeral=True)
+    else:
+        cur = await boost_active(gid, member.id)
+        if cur and cur[0] > mult:
+            return await interaction.response.send_message(
+                f"⚡ Tu as déjà un boost plus fort (**×{cur[0] / 100:g}**) : attends qu'il se termine.", ephemeral=True
+            )
+    if not await eco_charge(gid, member.id, price):
+        bal = await eco_balance(gid, member.id)
+        return await interaction.response.send_message(f"💸 Il te faut **{lvl_n(price)}** {COIN}, tu n'en as que **{lvl_n(bal)}**.", ephemeral=True)
+    if kind == "role":
+        try:
+            await member.add_roles(role, reason="Achat dans la boutique")
+        except discord.HTTPException:
+            await eco_add(gid, member.id, price)  # remboursé
+            return await interaction.response.send_message("🚫 Je n'ai pas pu donner le rôle : tu es remboursé.", ephemeral=True)
+        msg = f"✅ Tu as acheté **{name}** ! Le rôle {role.mention} est à toi 🖤"
+    else:
+        until = await boost_grant(gid, member.id, mult, minutes)
+        msg = f"✅ **{name}** activé ! XP ×{mult / 100:g} jusqu'à <t:{until}:R> ⚡"
+    bal = await eco_balance(gid, member.id)
+    await interaction.response.send_message(f"{msg}\nSolde : **{lvl_n(bal)}** {COIN}", ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+class ShopSelect(discord.ui.Select):
+    def __init__(self, items: list[tuple]):
+        options = [
+            discord.SelectOption(
+                label=it[1][:100], value=str(it[0]), description=f"{lvl_n(it[2])} pièces"[:100],
+                emoji="🎭" if it[3] == "role" else "⚡",
+            )
+            for it in items[:SHOP_MAX_ITEMS]
+        ]
+        super().__init__(placeholder="🛒 Acheter un article…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await shop_buy(interaction, int(self.values[0]))
+
+
+class ShopView(discord.ui.View):
+    def __init__(self, items: list[tuple]):
+        super().__init__(timeout=180)
+        self.add_item(ShopSelect(items))
+
+
+@bot.tree.command(name="boutique", description="Dépense tes pièces : rôles et boosts d'XP 🛍️")
+@app_commands.guild_only()
+async def boutique_cmd(interaction: discord.Interaction):
+    gid = interaction.guild_id
+    if not await eco_on(gid):
+        return await interaction.response.send_message("💸 L'économie n'est pas activée sur ce serveur.", ephemeral=True)
+    items = await shop_items(gid)
+    if not items:
+        return await interaction.response.send_message(
+            "🛍️ La boutique est vide… Un admin peut la remplir avec `/boutiqueadmin role` ou `/boutiqueadmin boost`.", ephemeral=True
+        )
+    lines = [f"**{name}** — {lvl_n(price)} {COIN}\n{shop_desc(kind, rid, mult, mins)}" for _id, name, price, kind, rid, mult, mins in items]
+    e = emb("🛍️ Boutique", "\n\n".join(lines)[:4000], COLOR_PINK)
+    bal = await eco_balance(gid, interaction.user.id)
+    e.set_footer(text=f"Ton solde : {lvl_n(bal)} 🪙 • choisis un article dans le menu")
+    bo = await boost_active(gid, interaction.user.id)
+    if bo:
+        e.add_field(name="⚡ Ton boost actuel", value=f"**×{bo[0] / 100:g}** jusqu'à <t:{bo[1]}:R>", inline=False)
+    await interaction.response.send_message(embed=e, view=ShopView(items), ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+boutique_group = app_commands.Group(
+    name="boutiqueadmin", description="(admin) Gère la boutique du serveur 🛍️",
+    guild_only=True, default_permissions=discord.Permissions(administrator=True),
+)
+
+
+async def _shop_full(gid: int) -> bool:
+    return (await db_all("SELECT COUNT(*) FROM shop_items WHERE guild_id=?", (gid,)))[0][0] >= SHOP_MAX_ITEMS
+
+
+@boutique_group.command(name="role", description="Ajoute un rôle à vendre")
+@app_commands.describe(role="Le rôle vendu", prix="Prix en pièces", nom="Nom affiché (par défaut : le nom du rôle)")
+@admin_only
+async def boutique_role(
+    interaction: discord.Interaction, role: discord.Role, prix: app_commands.Range[int, 1, ECO_MAX],
+    nom: Optional[app_commands.Range[str, 1, 60]] = None,
+):
+    if role.is_default() or role.managed:
+        return await interaction.response.send_message("🚫 Ce rôle ne peut pas être attribué à la main.", ephemeral=True)
+    if role >= interaction.guild.me.top_role:
+        return await interaction.response.send_message(
+            "🚫 Ce rôle est au-dessus (ou au niveau) du mien : monte mon rôle dans la liste des rôles du serveur.", ephemeral=True
+        )
+    if await _shop_full(interaction.guild_id):
+        return await interaction.response.send_message(f"🚫 La boutique est pleine ({SHOP_MAX_ITEMS} articles max).", ephemeral=True)
+    await db_run(
+        "INSERT INTO shop_items(guild_id,name,price,kind,role_id) VALUES (?,?,?,'role',?)",
+        (interaction.guild_id, nom or role.name, prix, role.id),
+    )
+    await interaction.response.send_message(f"✅ {role.mention} est en vente pour **{lvl_n(prix)}** {COIN}.", ephemeral=True, allowed_mentions=NO_PINGS)
+
+
+@boutique_group.command(name="boost", description="Ajoute un boost d'XP à vendre")
+@app_commands.describe(
+    multiplicateur="Ex : 1.5 = +50 % d'XP, 2 = double XP", minutes="Durée du boost en minutes",
+    prix="Prix en pièces", nom="Nom affiché (optionnel)",
+)
+@admin_only
+async def boutique_boost(
+    interaction: discord.Interaction, multiplicateur: app_commands.Range[float, 1.1, 5.0],
+    minutes: app_commands.Range[int, 1, 10080], prix: app_commands.Range[int, 1, ECO_MAX],
+    nom: Optional[app_commands.Range[str, 1, 60]] = None,
+):
+    if await _shop_full(interaction.guild_id):
+        return await interaction.response.send_message(f"🚫 La boutique est pleine ({SHOP_MAX_ITEMS} articles max).", ephemeral=True)
+    mult = round(multiplicateur * 100)
+    label = nom or f"Boost XP ×{mult / 100:g} ({lvl_dur(minutes * 60)})"
+    await db_run(
+        "INSERT INTO shop_items(guild_id,name,price,kind,mult_pct,minutes) VALUES (?,?,?,'boost',?,?)",
+        (interaction.guild_id, label, prix, mult, minutes),
+    )
+    await interaction.response.send_message(f"✅ **{label}** est en vente pour **{lvl_n(prix)}** {COIN}.", ephemeral=True)
+
+
+@boutique_group.command(name="retirer", description="Retire un article de la boutique")
+@app_commands.describe(item="L'article à retirer")
+@admin_only
+async def boutique_retirer(interaction: discord.Interaction, item: int):
+    cur = await bot.db.execute("DELETE FROM shop_items WHERE guild_id=? AND id=?", (interaction.guild_id, item))
+    await bot.db.commit()
+    await interaction.response.send_message("✅ Article retiré." if cur.rowcount else "Cet article n'existe pas 🤔", ephemeral=True)
+
+
+@boutique_retirer.autocomplete("item")
+async def _shop_item_ac(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+    cur = current.lower()
+    return [
+        app_commands.Choice(name=f"{it[1]} — {it[2]} 🪙"[:100], value=it[0])
+        for it in await shop_items(interaction.guild_id) if cur in it[1].lower()
+    ][:25]
+
+
+bot.tree.add_command(boutique_group)
 
 
 @bot.tree.command(name="donner", description="Donne des pièces à quelqu'un 💸")
@@ -5221,8 +5621,11 @@ eco_group = app_commands.Group(
 
 @eco_group.command(name="config", description="Active l'économie et règle les montants")
 @app_commands.describe(
-    actif="Activer / désactiver l'économie", depart="Solde de départ", daily="Montant du /daily",
+    actif="Activer / désactiver l'économie", depart="Solde de départ", daily="Montant de base du /daily",
     mise_min="Mise minimum", mise_max="Mise maximum",
+    travail_min="Gain minimum de /travail", travail_max="Gain maximum de /travail (/crime : de 2× à 3×)",
+    travail_delai="Minutes entre deux /travail", crime_delai="Minutes entre deux /crime",
+    serie_pct="Bonus de /daily par jour de série (en %)", serie_max="Nombre de jours de série pris en compte",
 )
 @admin_only
 async def eco_config(
@@ -5231,15 +5634,29 @@ async def eco_config(
     daily: Optional[app_commands.Range[int, 0, ECO_MAX]] = None,
     mise_min: Optional[app_commands.Range[int, 1, ECO_MAX]] = None,
     mise_max: Optional[app_commands.Range[int, 1, ECO_MAX]] = None,
+    travail_min: Optional[app_commands.Range[int, 0, ECO_MAX]] = None,
+    travail_max: Optional[app_commands.Range[int, 0, ECO_MAX]] = None,
+    travail_delai: Optional[app_commands.Range[int, 0, 10080]] = None,
+    crime_delai: Optional[app_commands.Range[int, 0, 10080]] = None,
+    serie_pct: Optional[app_commands.Range[int, 0, 100]] = None,
+    serie_max: Optional[app_commands.Range[int, 0, 60]] = None,
 ):
     gid = interaction.guild_id
     lo = mise_min if mise_min is not None else await eco_cfg(gid, "min_bet")
     hi = mise_max if mise_max is not None else await eco_cfg(gid, "max_bet")
     if lo > hi:
         return await interaction.response.send_message("🚫 La mise minimum dépasse la mise maximum.", ephemeral=True)
+    wlo = travail_min if travail_min is not None else await eco_cfg(gid, "work_min")
+    whi = travail_max if travail_max is not None else await eco_cfg(gid, "work_max")
+    if wlo > whi:
+        return await interaction.response.send_message("🚫 Le gain minimum de /travail dépasse le maximum.", ephemeral=True)
     if actif is not None:
         await set_flag(gid, "eco", actif)
-    for key, val in (("start", depart), ("daily", daily), ("min_bet", mise_min), ("max_bet", mise_max)):
+    for key, val in (
+        ("start", depart), ("daily", daily), ("min_bet", mise_min), ("max_bet", mise_max),
+        ("work_min", travail_min), ("work_max", travail_max), ("work_cd", travail_delai),
+        ("crime_cd", crime_delai), ("streak_pct", serie_pct), ("streak_max", serie_max),
+    ):
         if val is not None:
             await set_setting(gid, f"eco_{key}", str(val))
     await interaction.response.send_message(embed=await eco_panel_embed(interaction.guild), ephemeral=True)
@@ -5289,6 +5706,16 @@ async def eco_panel_embed(guild: discord.Guild) -> discord.Embed:
     e.add_field(name="État", value="🟢 Activée" if await eco_on(gid) else "🔴 Désactivée", inline=True)
     for key, label in ECO_LABELS.items():
         e.add_field(name=label, value=f"{await eco_cfg(gid, key)} {COIN}", inline=True)
+    wlo, whi = await _eco_range(gid)
+    e.add_field(name="💼 /travail", value=f"{wlo}–{whi} {COIN} • toutes les {await eco_cfg(gid, 'work_cd')} min", inline=True)
+    e.add_field(name="🕶️ /crime", value=f"{wlo * 2}–{whi * 3} {COIN} ou amende • toutes les {await eco_cfg(gid, 'crime_cd')} min", inline=True)
+    e.add_field(
+        name="🔥 Série /daily",
+        value=f"+{await eco_cfg(gid, 'streak_pct')} % par jour (max {await eco_cfg(gid, 'streak_max')} j) • jackpot tous les 7 jours",
+        inline=True,
+    )
+    shop_n = (await db_all("SELECT COUNT(*) FROM shop_items WHERE guild_id=?", (gid,)))[0][0]
+    e.add_field(name="🛍️ Boutique", value=f"{shop_n} article(s) • `/boutiqueadmin`", inline=True)
     e.add_field(name="📈 En circulation", value=f"{total} {COIN} • {n} joueur(s)", inline=False)
     e.set_footer(text=f"Panel privé • expire dans 5 min • {BOT_NAME} 🖤")
     return e
@@ -5441,10 +5868,19 @@ async def ecopanel(interaction: discord.Interaction):
 #   Activé par un admin (/xp config actif:True ou /adminpanel › Économie & accueil).
 #   Courbe (style MEE6) : il faut 5·n² + 50·n + 100 XP pour passer du niveau n au niveau n+1.
 #   • Chat  : 1 message par minute et par membre rapporte de l'XP (anti-spam).
+#   • Jeux  : chaque partie rapporte de l'XP — victoire, égalité OU défaite (bonus de mise et de série de victoires,
+#             plafond quotidien, XP réduite et espacée contre le bot sans mise).
+#   • Boosts: événement du serveur (/xp evenement) × boost personnel acheté dans /boutique.
 #   • Vocal : chaque minute passée en vocal rapporte de l'XP (+ des pièces si l'économie est activée).
 #             Anti-farm : casque coupé = rien, salon AFK = rien, et il faut être assez nombreux dans le salon.
 # =====================================================================
-LVL_DEFAULTS = {"msg_xp": 20, "voc_xp": 10, "voc_coins": 5, "voc_min": 2, "up_coins": 0}
+LVL_DEFAULTS = {
+    "msg_xp": 20, "voc_xp": 10, "voc_coins": 5, "voc_min": 2, "up_coins": 25,
+    "game_win": 40, "game_draw": 20, "game_loss": 10,   # XP de base d'une partie (selon le résultat)
+    "game_cap": 1500,                                   # plafond d'XP de jeux par jour et par membre (0 = illimité)
+    "daily_xp": 50, "work_xp": 30,                      # XP de /daily et de /travail
+    "skill_coins": 20,                                  # pièces d'une victoire au quiz (Kahoot ×3)
+}
 XP_MAX = 1_000_000_000
 LVL_MSG_COOLDOWN = 60  # secondes entre deux messages qui rapportent de l'XP
 VOICE_TICK = 60        # secondes entre deux « paies » vocales
@@ -5568,6 +6004,180 @@ async def lvl_levelup(member: discord.Member, old: int, new: int, where=None):
         pass
 
 
+# ---------- Multiplicateurs d'XP : événement du serveur × boost personnel (boutique) ----------
+XP_MULT_MAX = 1000  # ×10 au maximum, tout cumulé
+
+
+async def boost_active(gid: int, uid: int) -> Optional[tuple[int, int]]:
+    """(multiplicateur en %, fin en timestamp) si le membre a un boost personnel actif."""
+    rows = await db_all(
+        "SELECT mult_pct, until FROM user_boosts WHERE guild_id=? AND user_id=? AND until>?", (gid, uid, int(time.time()))
+    )
+    return (rows[0][0], rows[0][1]) if rows else None
+
+
+async def boost_grant(gid: int, uid: int, mult_pct: int, minutes: int) -> int:
+    """Donne un boost. Même force déjà active : le temps s'ajoute ; sinon il remplace. Renvoie la fin (timestamp)."""
+    now, cur = int(time.time()), await boost_active(gid, uid)
+    until = cur[1] + minutes * 60 if cur and cur[0] == mult_pct else now + minutes * 60
+    await db_run(
+        "INSERT INTO user_boosts(guild_id,user_id,mult_pct,until) VALUES (?,?,?,?) "
+        "ON CONFLICT(guild_id,user_id) DO UPDATE SET mult_pct=excluded.mult_pct, until=excluded.until",
+        (gid, uid, mult_pct, until),
+    )
+    return until
+
+
+async def xp_event_state(gid: int) -> Optional[tuple[int, int]]:
+    """(multiplicateur en %, fin) de l'événement XP du serveur, s'il est en cours."""
+    mult, until = await get_int(gid, "lvl_event_mult"), await get_int(gid, "lvl_event_until")
+    return (mult, until) if mult > 100 and until > time.time() else None
+
+
+async def xp_mult_pct(gid: int, uid: int) -> int:
+    """Multiplicateur d'XP en % (100 = ×1) : événement du serveur × boost personnel."""
+    pct = 100
+    ev = await xp_event_state(gid)
+    if ev:
+        pct = pct * ev[0] // 100
+    bo = await boost_active(gid, uid)
+    if bo:
+        pct = pct * bo[0] // 100
+    return min(pct, XP_MULT_MAX)
+
+
+async def lvl_gain(gid: int, uid: int, base: int, *, voice_secs: int = 0) -> tuple[int, int, int]:
+    """Comme lvl_add_xp mais avec les multiplicateurs. Renvoie (ancien niveau, nouveau niveau, XP réellement gagnée)."""
+    gain = max(0, round(base * await xp_mult_pct(gid, uid) / 100))
+    old, new = await lvl_add_xp(gid, uid, gain, voice_secs=voice_secs)
+    return old, new, gain
+
+
+# ---------- Gains : jeux (victoire, égalité OU défaite rapportent de l'XP) ----------
+GAME_XP_MULT = {"blackjack": 100, "poker": 120, "pfc": 100, "quiz": 80, "kahoot": 150}  # % de l'XP de base
+SKILL_GAMES = {"quiz": 1, "kahoot": 3}  # jeux d'adresse : pièces offertes à la victoire (× ce facteur), même sans mise
+SOLO_XP_PCT = 50       # partie gratuite contre le bot : moitié d'XP…
+GAME_SOLO_CD = 20      # …et au plus une partie rémunérée toutes les 20 s (anti-spam)
+STREAK_STEP, STREAK_MAX = 10, 50  # +10 % d'XP par victoire d'affilée, jusqu'à +50 %
+_game_last: dict[tuple[int, int, str], float] = {}
+_game_lock = asyncio.Lock()
+
+
+def game_xp_calc(result: str, base: int, gmult: int = 100, *, bet: int = 0, streak: int = 0, solo: bool = False) -> int:
+    """XP d'une partie, avant boost et plafond. `streak` = victoires d'affilée, la présente comprise."""
+    if base <= 0:
+        return 0
+    xp = base * gmult / 100
+    if solo:
+        xp = xp * SOLO_XP_PCT / 100
+    if bet > 0:
+        xp += min(bet // 10, 100)  # miser gros rapporte plus (jusqu'à +100 XP)
+    if result == "win" and streak >= 2:
+        xp *= 1 + min((streak - 1) * STREAK_STEP, STREAK_MAX) / 100
+    return max(1, round(xp))
+
+
+def xp_tag(g: Optional[dict]) -> str:
+    """Petite ligne « ✨ +40 XP • 🪙 +20 • 🔥 série ×3 » à coller sous le résultat d'une partie."""
+    if not g:
+        return ""
+    bits = []
+    if g["xp"]:
+        bits.append(f"✨ **+{lvl_n(g['xp'])}** XP")
+    if g["coins"]:
+        bits.append(f"{COIN} **+{lvl_n(g['coins'])}**")
+    if g["streak"] >= 2:
+        bits.append(f"🔥 série ×{g['streak']}")
+    if g["capped"]:
+        bits.append("⛔ plafond du jour atteint")
+    return " • ".join(bits)
+
+
+async def game_state(gid: int, uid: int) -> dict:
+    """XP de jeux : total, du jour, série de victoires en cours et record."""
+    rows = await db_all("SELECT day, xp_today, streak, best_streak, total_xp FROM game_xp WHERE guild_id=? AND user_id=?", (gid, uid))
+    if not rows:
+        return {"today": 0, "streak": 0, "best": 0, "total": 0}
+    day, used, streak, best, total = rows[0]
+    return {"today": used if day == datetime.date.today().isoformat() else 0, "streak": streak, "best": best, "total": total}
+
+
+async def game_rewards(
+    gid: int, game: str, outcomes: dict, *, bet: int = 0, channel=None, solo: bool = False, skip=frozenset(),
+) -> dict[int, dict]:
+    """XP après une partie (+ pièces pour quiz / kahoot). Renvoie {uid: {xp, coins, streak, capped}}."""
+    if not await lvl_on(gid) or not await get_flag(gid, "lvl_games", True):
+        return {}
+    base = {r: await lvl_cfg(gid, f"game_{r}") for r in ("win", "draw", "loss")}
+    cap = await lvl_cfg(gid, "game_cap")
+    skill = SKILL_GAMES.get(game, 0) * await lvl_cfg(gid, "skill_coins") if await eco_on(gid) else 0
+    today, now = datetime.date.today().isoformat(), time.time()
+    guild = bot.get_guild(gid)
+    resolve = getattr(guild, "get_channel_or_thread", None)
+    if channel is not None and resolve is not None:  # le salon d'un message d'interaction peut être « partiel » : on prend le vrai
+        channel = resolve(getattr(channel, "id", 0)) or channel
+    gains: dict[int, dict] = {}
+    for uid, res in outcomes.items():
+        if uid <= 0 or uid in skip or res not in base:
+            continue
+        if solo:
+            if now - _game_last.get((gid, uid, game), 0) < GAME_SOLO_CD:
+                continue
+            _game_last[(gid, uid, game)] = now
+        pct = await xp_mult_pct(gid, uid)
+        async with _game_lock:
+            rows = await db_all("SELECT day, xp_today, streak, best_streak FROM game_xp WHERE guild_id=? AND user_id=?", (gid, uid))
+            day, used, streak, best = rows[0] if rows else ("", 0, 0, 0)
+            if day != today:
+                used = 0
+            streak = streak + 1 if res == "win" else (0 if res == "loss" else streak)
+            best = max(best, streak)
+            xp = round(game_xp_calc(res, base[res], GAME_XP_MULT.get(game, 100), bet=bet, streak=streak, solo=solo) * pct / 100)
+            room = None if cap <= 0 else max(0, cap - used)
+            capped = room is not None and xp > room
+            if capped:
+                xp = room
+            await bot.db.execute(
+                "INSERT INTO game_xp(guild_id,user_id,day,xp_today,streak,best_streak,total_xp) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(guild_id,user_id) DO UPDATE SET day=excluded.day, xp_today=excluded.xp_today, "
+                "streak=excluded.streak, best_streak=excluded.best_streak, total_xp=total_xp+excluded.total_xp",
+                (gid, uid, today, used + xp, streak, best, xp),
+            )
+            await bot.db.commit()
+        coins = skill if res == "win" and skill > 0 and (room is None or room > 0) else 0
+        old, new = await lvl_add_xp(gid, uid, xp) if xp > 0 else (0, 0)
+        if coins:
+            await eco_add(gid, uid, coins)
+        gains[uid] = {"xp": xp, "coins": coins, "streak": streak, "capped": capped}
+        if new > old and guild is not None:
+            member = guild.get_member(uid)
+            if member is None:  # pas en cache : on va le chercher pour pouvoir donner ses rôles-récompenses
+                try:
+                    member = await guild.fetch_member(uid)
+                except discord.HTTPException:
+                    member = None
+            if member is not None:
+                spawn(lvl_levelup(member, old, new, channel))
+    if channel is not None and gains and await get_flag(gid, "lvl_recap", True):
+        spawn(game_recap(channel, gains))
+    return gains
+
+
+async def game_recap(channel, gains: dict):
+    """Petit récap sous la partie : XP / pièces / série de chaque joueur."""
+    lines = [f"<@{u}> — {t}" for u, g in gains.items() if (t := xp_tag(g))]
+    guild = getattr(channel, "guild", None)
+    if not lines or guild is None or guild.me is None or await is_silenced(guild.id):
+        return
+    perms = channel.permissions_for(guild.me)
+    if not (perms.send_messages and perms.embed_links):
+        return
+    try:
+        await channel.send(embed=emb("✨ Récompenses de la partie", "\n".join(lines[:15]), COLOR_PINK), allowed_mentions=NO_PINGS)
+    except discord.HTTPException:
+        pass
+
+
 # ---------- Gains : messages ----------
 async def lvl_on_message(message: discord.Message):
     try:
@@ -5586,7 +6196,7 @@ async def lvl_on_message(message: discord.Message):
             return
         _lvl_last_msg[key] = now
         gain = random.randint(max(1, round(base * 0.75)), max(1, round(base * 1.25)))
-        old, new = await lvl_add_xp(gid, message.author.id, gain)
+        old, new, _ = await lvl_gain(gid, message.author.id, gain)
         if new > old:
             await lvl_levelup(message.author, old, new, message.channel)
     except Exception:  # noqa: BLE001
@@ -5613,7 +6223,7 @@ async def lvl_voice_tick(guild: discord.Guild):
         if len(eligible) < min_users:
             continue
         for m in eligible:
-            old, new = await lvl_add_xp(gid, m.id, xp_gain, voice_secs=VOICE_TICK)
+            old, new, _ = await lvl_gain(gid, m.id, xp_gain, voice_secs=VOICE_TICK)
             if coins > 0:
                 await eco_add(gid, m.id, coins)
             if new > old:
@@ -5625,6 +6235,12 @@ async def voice_xp_loop():
     now = time.time()
     for k in [k for k, t in _lvl_last_msg.items() if now - t > 3600]:  # ménage du cooldown
         _lvl_last_msg.pop(k, None)
+    for k in [k for k, t in _game_last.items() if now - t > 600]:
+        _game_last.pop(k, None)
+    try:
+        await db_run("DELETE FROM user_boosts WHERE until<=?", (int(now),))  # boosts expirés
+    except Exception:  # noqa: BLE001
+        log.exception("voice_xp_loop : ménage des boosts")
     for guild in list(bot.guilds):
         try:
             await lvl_voice_tick(guild)
@@ -5669,6 +6285,23 @@ async def niveau(interaction: discord.Interaction, membre: Optional[discord.Memb
         inline=False,
     )
     e.add_field(name="🎙️ Temps en vocal", value=lvl_dur(vsecs), inline=True)
+    if await eco_on(gid):
+        e.add_field(name="🪙 Pièces", value=f"**{lvl_n(await eco_balance(gid, target.id))}**", inline=True)
+    mult = await xp_mult_pct(gid, target.id)
+    if mult > 100:
+        e.add_field(name="⚡ Multiplicateur d'XP", value=f"**×{mult / 100:g}** actif", inline=True)
+    gs = await game_state(gid, target.id)
+    if gs["total"] or gs["best"]:
+        cap = await lvl_cfg(gid, "game_cap")
+        e.add_field(
+            name="🎮 Jeux",
+            value=(
+                f"✨ **{lvl_n(gs['total'])}** XP gagnés en jouant • aujourd'hui **{lvl_n(gs['today'])}**"
+                + (f" / {lvl_n(cap)}" if cap else "")
+                + f"\n🔥 Série de victoires : **{gs['streak']}** (record **{gs['best']}**)"
+            ),
+            inline=False,
+        )
     nxt = await db_all(
         "SELECT level, role_id FROM level_rewards WHERE guild_id=? AND level>? ORDER BY level LIMIT 1", (gid, level)
     )
@@ -5717,8 +6350,10 @@ async def lvl_cfg_embed(guild: discord.Guild) -> discord.Embed:
     gid = guild.id
     eco = await eco_on(gid)
     voice = await get_flag(gid, "lvl_voice", True)
+    games = await get_flag(gid, "lvl_games", True)
+    recap = await get_flag(gid, "lvl_recap", True)
     cid = await get_int(gid, "lvl_channel")
-    e = emb("📈 Niveaux", "XP en discutant et en vocal, argent en vocal, rôles-récompenses.", COLOR_DARK)
+    e = emb("📈 Niveaux", "XP en discutant, en vocal et en jouant • boosts • rôles-récompenses.", COLOR_DARK)
     e.add_field(name="État", value="🟢 Activés" if await lvl_on(gid) else "🔴 Désactivés (`/xp config actif:True`)", inline=False)
     e.add_field(name="💬 Chat", value=f"**{await lvl_cfg(gid, 'msg_xp')}** XP par message (1 / minute max)", inline=False)
     voc = f"{'✅' if voice else '❌'} **{await lvl_cfg(gid, 'voc_xp')}** XP / min"
@@ -5728,9 +6363,27 @@ async def lvl_cfg_embed(guild: discord.Guild) -> discord.Embed:
         voc += " • argent : économie désactivée (`/eco config`)"
     voc += f"\n👥 Minimum **{await lvl_cfg(gid, 'voc_min')}** membre(s) (casque coupé = non compté)"
     e.add_field(name="🎙️ Vocal", value=voc, inline=False)
-    e.add_field(name="🎁 Bonus de niveau", value=f"**{await lvl_cfg(gid, 'up_coins')}** {COIN} × le niveau atteint", inline=True)
+    cap = await lvl_cfg(gid, "game_cap")
+    jeux = (
+        f"{'✅' if games else '❌'} victoire **{await lvl_cfg(gid, 'game_win')}** • égalité **{await lvl_cfg(gid, 'game_draw')}** "
+        f"• défaite **{await lvl_cfg(gid, 'game_loss')}** XP\n"
+        f"📊 Plafond : **{cap if cap else 'illimité'}** XP / jour • 🧾 Récap sous la partie : {'✅' if recap else '❌'}\n"
+        f"🔥 +{STREAK_STEP} % par victoire d'affilée (max +{STREAK_MAX} %) • mise : jusqu'à +100 XP • partie gratuite vs bot : ½ XP"
+    )
+    if eco:
+        jeux += f"\n🧠 Victoire au quiz : **{await lvl_cfg(gid, 'skill_coins')}** {COIN} (Kahoot ×3)"
+    e.add_field(name="🎮 Jeux", value=jeux, inline=False)
+    e.add_field(
+        name="🎁 Autres gains",
+        value=f"/daily : **{await lvl_cfg(gid, 'daily_xp')}** XP (+5 par jour de série) • /travail : **{await lvl_cfg(gid, 'work_xp')}** XP",
+        inline=False,
+    )
+    e.add_field(name="🏆 Bonus de niveau", value=f"**{await lvl_cfg(gid, 'up_coins')}** {COIN} × le niveau atteint", inline=True)
     e.add_field(name="📣 Annonces", value=f"<#{cid}>" if cid else "Dans le salon du membre", inline=True)
     e.add_field(name="🎭 Récompenses", value=f"**{len(await lvl_rewards(gid))}** rôle(s) (`/recompense liste`)", inline=True)
+    ev = await xp_event_state(gid)
+    if ev:
+        e.add_field(name="⚡ Événement XP en cours", value=f"**×{ev[0] / 100:g}** jusqu'à <t:{ev[1]}:R>", inline=False)
     return e
 
 
@@ -5745,6 +6398,12 @@ async def lvl_cfg_embed(guild: discord.Guild) -> discord.Embed:
     vocal="Activer / désactiver les gains en vocal",
     salon="Salon où annoncer les passages de niveau",
     salon_auto="True = annoncer dans le salon où le membre parle (défaut)",
+    jeux="Activer / désactiver l'XP gagnée en jouant",
+    xp_jeu_victoire="XP de base d'une victoire", xp_jeu_egalite="XP de base d'une égalité", xp_jeu_defaite="XP de base d'une défaite",
+    plafond_jeux="XP max gagnée aux jeux par jour et par membre (0 = illimité)",
+    recap="Poster un récap des gains sous chaque partie",
+    xp_daily="XP de base du /daily", xp_travail="XP de base du /travail",
+    argent_quiz="Pièces d'une victoire au quiz (Kahoot ×3, économie requise)",
 )
 @admin_only
 async def xp_config(
@@ -5755,6 +6414,15 @@ async def xp_config(
     membres_min: Optional[app_commands.Range[int, 1, 25]] = None,
     argent_niveau: Optional[app_commands.Range[int, 0, 100000]] = None,
     vocal: Optional[bool] = None, salon: Optional[discord.TextChannel] = None, salon_auto: Optional[bool] = None,
+    jeux: Optional[bool] = None,
+    xp_jeu_victoire: Optional[app_commands.Range[int, 0, 1000]] = None,
+    xp_jeu_egalite: Optional[app_commands.Range[int, 0, 1000]] = None,
+    xp_jeu_defaite: Optional[app_commands.Range[int, 0, 1000]] = None,
+    plafond_jeux: Optional[app_commands.Range[int, 0, 1_000_000]] = None,
+    recap: Optional[bool] = None,
+    xp_daily: Optional[app_commands.Range[int, 0, 10000]] = None,
+    xp_travail: Optional[app_commands.Range[int, 0, 10000]] = None,
+    argent_quiz: Optional[app_commands.Range[int, 0, 100000]] = None,
 ):
     gid = interaction.guild_id
     if salon is not None:
@@ -5770,11 +6438,38 @@ async def xp_config(
         await set_flag(gid, "levels", actif)
     if vocal is not None:
         await set_flag(gid, "lvl_voice", vocal)
+    if jeux is not None:
+        await set_flag(gid, "lvl_games", jeux)
+    if recap is not None:
+        await set_flag(gid, "lvl_recap", recap)
     for key, val in (("msg_xp", xp_message), ("voc_xp", xp_vocal), ("voc_coins", argent_vocal),
-                     ("voc_min", membres_min), ("up_coins", argent_niveau)):
+                     ("voc_min", membres_min), ("up_coins", argent_niveau),
+                     ("game_win", xp_jeu_victoire), ("game_draw", xp_jeu_egalite), ("game_loss", xp_jeu_defaite),
+                     ("game_cap", plafond_jeux), ("daily_xp", xp_daily), ("work_xp", xp_travail),
+                     ("skill_coins", argent_quiz)):
         if val is not None:
             await set_setting(gid, f"lvl_{key}", str(val))
     await interaction.response.send_message(embed=await lvl_cfg_embed(interaction.guild), ephemeral=True)
+
+
+@xp_group.command(name="evenement", description="Lance un événement d'XP (ex : double XP pendant 2 h) ⚡")
+@app_commands.describe(multiplicateur="Ex : 2 = double XP", minutes="Durée en minutes (0 = arrêter l'événement)")
+@admin_only
+async def xp_evenement_cmd(
+    interaction: discord.Interaction, multiplicateur: app_commands.Range[float, 1.0, 5.0] = 2.0,
+    minutes: app_commands.Range[int, 0, 10080] = 60,
+):
+    gid = interaction.guild_id
+    if minutes == 0 or multiplicateur <= 1.0:
+        await set_setting(gid, "lvl_event_until", "0")
+        return await interaction.response.send_message("✅ Événement d'XP arrêté.", ephemeral=True)
+    until = int(time.time()) + minutes * 60
+    await set_setting(gid, "lvl_event_mult", str(round(multiplicateur * 100)))
+    await set_setting(gid, "lvl_event_until", str(until))
+    note = "" if await lvl_on(gid) else "\n_(Les niveaux sont désactivés : `/xp config actif:True`.)_"
+    await interaction.response.send_message(
+        embed=emb("⚡ ÉVÉNEMENT XP !", f"**XP ×{multiplicateur:g}** sur tout le serveur (chat, vocal, jeux) jusqu'à <t:{until}:R> 🔥{note}", COLOR_PINK)
+    )
 
 
 @xp_group.command(name="donner", description="Donne de l'XP à un membre")
@@ -5807,6 +6502,7 @@ async def xp_take(interaction: discord.Interaction, membre: discord.Member, mont
 @admin_only
 async def xp_reset(interaction: discord.Interaction, membre: discord.Member):
     await db_run("DELETE FROM levels WHERE guild_id=? AND user_id=?", (interaction.guild_id, membre.id))
+    await db_run("DELETE FROM game_xp WHERE guild_id=? AND user_id=?", (interaction.guild_id, membre.id))
     await interaction.response.send_message(
         f"✅ {membre.mention} repart de zéro. Les rôles déjà obtenus ne sont pas retirés.", ephemeral=True
     )
@@ -8740,14 +9436,16 @@ class PFCDuel:
         self.finished = True
         if winner is None:
             await self._refund_both()
-            spawn(record_many(self.gid, "pfc", {self.a.id: "draw", self.b.id: "draw"}))
+            spawn(record_many(self.gid, "pfc", {self.a.id: "draw", self.b.id: "draw"}, bet=self.bet,
+                              channel=getattr(self.message, "channel", None)))
             desc = f"{recap}\n\n🤝 Égalité : personne ne gagne" + (" et les mises sont rendues." if self.bet else ".")
             embed = emb("🤝 Duel terminé", desc, COLOR_PINK)
         else:
             loser = self.b if winner.id == self.a.id else self.a
             if self.bet:
                 await eco_add(self.gid, winner.id, self.bet * 2)
-            spawn(record_many(self.gid, "pfc", {winner.id: "win", loser.id: "loss"}))
+            spawn(record_many(self.gid, "pfc", {winner.id: "win", loser.id: "loss"}, bet=self.bet,
+                          channel=getattr(self.message, "channel", None)))
             desc = f"{recap}\n\n🏆 {winner.mention} gagne" + (f" **{self.bet * 2}** {COIN}" if self.bet else "") + " ! Sois bon perdant, " + loser.mention + " 😈"
             embed = emb("🏆 Duel terminé", desc, COLOR_PINK)
         await self._edit(interaction, embed, None)
@@ -9571,7 +10269,7 @@ class KahootGame:
             top = self.scores.get(ranking[0], 0)
             leaders = [u for u in ranking if self.scores.get(u, 0) == top and top > 0]
             outcomes = {u: ("loss" if u not in leaders else ("win" if len(leaders) == 1 else "draw")) for u in ranking}
-            await record_many(gid, "kahoot", outcomes)
+            await record_many(gid, "kahoot", outcomes, channel=self.channel)
 
 
 class KahootAnswerBtn(discord.ui.Button):
@@ -10117,7 +10815,7 @@ async def jeux(interaction: discord.Interaction, mise: app_commands.Range[int, 0
     e.add_field(name="✂️ Pierre-feuille-ciseaux", value="Contre moi (menu) ou en duel ⚔️.", inline=True)
     e.add_field(name="🧠 Quiz", value="Quiz IA ou quiz créés par les membres.", inline=True)
     e.add_field(name="🎯 Kahoot", value="Quiz live multi-joueurs : crée le tien ou laisse l'IA le faire.", inline=True)
-    e.add_field(name="🏆 Stats", value="Classement, profil, solde, règles et classement des mains.", inline=True)
+    e.add_field(name="🏆 Stats", value="Classement, profil, solde, règles et mains. Chaque partie rapporte de l'XP ✨", inline=True)
     if mise:
         e.add_field(name="💰 Mise active", value=f"**{mise}** {COIN} sur le blackjack et le poker.", inline=False)
     elif await eco_on(interaction.guild_id):
