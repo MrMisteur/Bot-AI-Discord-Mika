@@ -1,5 +1,60 @@
 """Bot Discord IA 🖤 — version e-girl dominatrice
 
+Chat par mention / réponse / prénom (« Mika »), /ask, /recherche, /roast, /blague, /8ball, /choisir,
+commandes sociales (/kiss, /hug, /pat, /slap, /bonk, /gift), mariage, mini-jeux (/pfc, /quiz, /blackjack,
+/poker) avec stats (/classement, /stat), météo, /ping, commandes personnalisées (/commande, /cc, !nom),
+modération (/punition panel|deban, rôles, mute vocal, /silence, /logs), /rolereaction, /envoyer, /statu, /emoji,
+/adminpanel + /aideadmin (réservés aux admins), mémoire SQLite.
+
+NOUVEAUTÉS 4 : ÉCONOMIE & XP v2 — l'XP se gagne aussi EN JOUANT (victoire, égalité ou défaite) avec bonus de mise et de série
+de victoires + plafond quotidien anti-farm ; /daily avec série et jackpot hebdo ; /travail ; /crime ; /boutique (rôles et boosts
+d'XP) + /boutiqueadmin ; /xp evenement (double XP) ; /niveau et /solde enrichis. Réglages : /xp config et /eco config.
+
+NOUVEAUTÉS 3 : NIVEAUX — /niveau, /topniveaux, /xp, /recompense. XP en discutant et en vocal, pièces gagnées en vocal,
+rôles-récompenses par niveau. Activation : /xp config actif:True (ou /adminpanel › Économie & accueil).
+
+NOUVEAUTÉS 2 : /regle (règles à ACCEPTER sinon expulsion), /envoyer avec l'identité du bot, /givawayyy (giveaways).
+
+NOUVEAUTÉS : /optimiser (perf + conseils), /dev (sites & apps générés par l'IA), /bienvenue (messages d'accueil
+personnalisés), /sondage (sondages à boutons), /ticket (assistance), /annonce, /purge.
+
+LOGS : toutes les sanctions (mute, unmute, avertissement, kick, ban, nettoyage, mute vocal, casque, rôles, deban)
+ET toutes les commandes du bot (slash, panel admin, commandes perso !nom) sont envoyées dans le salon défini
+avec /logs.
+
+Python 3.10+ requis. Voir .env.example pour la config.
+
+══════════════ INSTALLATION RAPIDE ══════════════
+  1) pip install discord.py aiosqlite httpx openai ddgs python-dotenv psutil
+  2) Créer un fichier .env à côté de ce fichier (modèle ci-dessous)
+  3) python bot.py
+
+══════════════ MODÈLE DE .env ══════════════
+  # --- Obligatoires ---
+  DISCORD_TOKEN=ton_token_discord
+  AI_API_KEY=ta_cle_api
+  
+  # --- Optionnelles ---
+  # AI_BASE_URL=https://api.groq.com/openai/v1
+  # AI_MODEL=openai/gpt-oss-120b
+  # BOT_NAME=Mika
+  # DB_PATH=bot.db
+  # HISTORY_SIZE=12
+  # REACT_CHANCE=0.05
+  # SPONTANEOUS_CHANCE=0.03
+  # PHRASE_CHANCE=0.60
+  # NAME_TRIGGER=1
+  # DEV_MAX_TOKENS=8000
+  # SYNC_ON_START=1
+  # EMBED_AIRY=1            # 1 = aperçus (embeds) aérés, 0 = présentation compacte
+  
+  # --- Projet (/lien) ---
+  # BOT_LINK=https://github.com/MrMisteur/Bot-AI-Discord-Mika
+
+══════════════ .gitignore conseillé ══════════════
+  .env / bot.db* / cookies.txt / __pycache__/ / .venv/
+"""
+
 ##############################################################################
 # SOMMAIRE (l'ordre des parties est celui d'exécution : ne pas le changer,
 # les commandes et classes se déclarent au fil du fichier)
