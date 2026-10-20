@@ -21,9 +21,9 @@ Bot Discord en français, personnalité « e-girl dominatrice, entre potes ». I
 ## Fonctionnalités
 
 - **Chat IA** : répond aux mentions, aux réponses à ses messages et quand on écrit son prénom ; rebonds spontanés et réactions emoji aléatoires ; mémoire par salon (SQLite) ; mode « protectrice » automatique si quelqu'un semble aller mal.
-- **Social** : mariage (jusqu'à 3 par mariage), compatibilité, roast, blagues, 8ball, actions (`/kiss`, `/hug`, `/pat`, `/slap`, `/bonk`, `/gift`).
+- **Social** : mariage (jusqu'à 3 par mariage), compatibilité, roast, blagues, 8ball, actions (`/action` : bisou, câlin, headpat, gifle, bonk, cadeau).
 - **Jeux** : pierre-feuille-ciseaux (et duel), quiz, blackjack et poker multi-joueurs, quiz créés par les membres, **Kahoot** (quiz live multi-joueurs, créés à la main ou par l'IA), classements et stats.
-- **Économie** : solde, bonus quotidien avec série et jackpot hebdo, `/travail`, `/crime`, dons (avec taxe), classement des plus riches, mises sur les jeux.
+- **Économie** : solde, bonus quotidien avec série et jackpot hebdo, `/argent travail`, `/argent crime`, dons (avec taxe), classement des plus riches, mises sur les jeux.
 - **Boutique** : rôles, boosts d'XP, coffres mystère, boucliers anti-braquage et **cosmétiques** (titres, couleurs et fonds de carte), plus une **boutique tournante** d'articles à durée limitée. Les admins peuvent aussi offrir ou reprendre un cosmétique à un membre.
 - **Quêtes, succès, banque, braquages** : 3 quêtes par jour et 3 par semaine, badges avec récompenses, compte en banque à intérêts, vols entre joueurs.
 - **Niveaux** : de l'XP en discutant, **en vocal et en jouant**, des pièces gagnées en vocal, annonces de passage de niveau, rôles offerts à certains niveaux, **prestige**, classements (XP ou temps en vocal), anti-farm et plafonds quotidiens.
@@ -111,7 +111,7 @@ Au premier démarrage, les commandes slash se synchronisent automatiquement. Ell
 | `PHRASE_CHANCE` | `0.60` | Probabilité d'une phrase « mommy » sur câlin/bisou |
 | `NAME_TRIGGER` | `1` | `1` : répond aussi quand on écrit son prénom ; `0` : désactivé |
 | `EMBED_AIRY` | `1` | `1` : messages (embeds) aérés ; `0` : présentation compacte |
-| `BOT_LINK` | lien GitHub du projet | Lien affiché par `/lien` |
+| `BOT_LINK` | lien GitHub du projet | Lien affiché par `/bot lien` |
 | `DEV_MAX_TOKENS` | `8000` | Taille max de sortie de `/dev projet` (à baisser si ton modèle limite) |
 | `SYNC_ON_START` | *(vide)* | `1` : force la resynchronisation des commandes à chaque démarrage |
 
@@ -137,7 +137,7 @@ Les niveaux sont **désactivés par défaut** (comme l'économie). Un admin les 
 | 💬 Chat | environ **20 XP** par message | 1 message par minute et par membre maximum (anti-spam, anti copier-coller), gain aléatoire ±25 % |
 | 🎙️ Vocal | **10 XP** par minute | Paie toutes les minutes tant que tu remplis les conditions ci-dessous |
 | 🎮 Jeux | **40 / 20 / 10 XP** | Victoire / égalité / défaite, avec bonus de mise et de série de victoires 🔥 |
-| 📅 `/daily` et `/travail` | **50 XP** et **30 XP** | |
+| 📅 `/daily` et `/argent travail` | **50 XP** et **30 XP** | |
 | 🪙 Vocal (argent) | **5 pièces** par minute | Seulement si l'**économie** est activée (`/ecopanel`) |
 | 🏆 Passage de niveau | **25 pièces × le niveau** | Une seule fois par niveau (20 % si déjà touché, après un prestige) ; réglable avec `argent_niveau` |
 
@@ -168,7 +168,7 @@ Il faut `5·n² + 50·n + 100` XP pour passer du niveau `n` au niveau `n+1` (mê
 
 ### Prestige
 
-Au niveau requis (**50** par défaut), `/prestige` remet le niveau à zéro contre une ⭐ **permanente** et un **bonus d'XP définitif** (**+5 %** par étoile, **10 étoiles** maximum par défaut). Les trois valeurs se règlent avec `/xp config` (`prestige_niveau`, `prestige_bonus`, `prestige_max`).
+Au niveau requis (**50** par défaut), `/profil prestige` remet le niveau à zéro contre une ⭐ **permanente** et un **bonus d'XP définitif** (**+5 %** par étoile, **10 étoiles** maximum par défaut). Les trois valeurs se règlent avec `/xp config` (`prestige_niveau`, `prestige_bonus`, `prestige_max`).
 
 ### Réglages (`/xp config`)
 
@@ -205,9 +205,9 @@ L'économie est **désactivée par défaut**. Un admin l'active avec `/ecopanel`
 | --- | --- | --- |
 | Solde de départ | `1000` | Pièces d'un nouveau membre |
 | Bonus `/daily` | `200` | Grimpe avec la **série** (elle continue si tu réclames dans les 48 h), jackpot chaque semaine |
-| Mises | `10` à `5000` | Limites des mises sur `/blackjack`, `/poker`, `/pfcduel` |
-| Taxe sur `/donner` | `5 %` | Détruits (réglable avec `/eco config taxe_don`, `0` = aucune) |
-| `/crime` | 55 % de réussite | Gain en cas de succès, amende sinon |
+| Mises | `10` à `5000` | Limites des mises sur `/blackjack`, `/poker`, `/pfc duel` |
+| Taxe sur `/argent donner` | `5 %` | Détruits (réglable avec `/eco config taxe_don`, `0` = aucune) |
+| `/argent crime` | 55 % de réussite | Gain en cas de succès, amende sinon |
 
 ### Quêtes, succès, banque et braquages
 
@@ -215,14 +215,14 @@ Chaque module s'active et se règle avec `/ecoplus config`.
 
 | Module | Fonctionnement |
 | --- | --- |
-| 📜 **Quêtes** | 3 quêtes **du jour** et 3 **de la semaine** avec `/quetes`. Terminer les 3 donne un bonus : **150 🪙 + 50 XP** (jour), **600 🪙 + 150 XP** (semaine) |
-| 🏅 **Succès** | `/succes` : badges débloqués avec des pièces à chaque fois. Ils s'affichent sur la carte de profil |
-| 🏦 **Banque** | `/banque voir\|deposer\|retirer` : **1 % d'intérêts par jour** (30 jours rattrapés au maximum), plafond du compte **50 000 🪙**, à l'abri des braqueurs |
-| 🥷 **Braquages** | `/braquer @membre` : **45 %** de réussite, **90 min** entre deux braquages, butin max **5 000 🪙**, la victime est protégée **30 min** après un vol, il faut **200 🪙** en poche pour être braquable. Raté = amende |
+| 📜 **Quêtes** | 3 quêtes **du jour** et 3 **de la semaine** avec `/profil quetes`. Terminer les 3 donne un bonus : **150 🪙 + 50 XP** (jour), **600 🪙 + 150 XP** (semaine) |
+| 🏅 **Succès** | `/profil succes` : badges débloqués avec des pièces à chaque fois. Ils s'affichent sur la carte de profil |
+| 🏦 **Banque** | `/argent banque voir\|deposer\|retirer` : **1 % d'intérêts par jour** (30 jours rattrapés au maximum), plafond du compte **50 000 🪙**, à l'abri des braqueurs |
+| 🥷 **Braquages** | `/argent braquer @membre` : **45 %** de réussite, **90 min** entre deux braquages, butin max **5 000 🪙**, la victime est protégée **30 min** après un vol, il faut **200 🪙** en poche pour être braquable. Raté = amende |
 
 ### La boutique
 
-`/boutique` ouvre une vitrine par catégorie, avec un **aperçu** de l'objet sur ta propre carte avant d'acheter.
+`/boutique voir` ouvre une vitrine par catégorie, avec un **aperçu** de l'objet sur ta propre carte avant d'acheter.
 
 | Catégorie | Contenu |
 | --- | --- |
@@ -235,20 +235,20 @@ Chaque module s'active et se règle avec `/ecoplus config`.
 | 🛡️ Boucliers | Protection contre les braquages pendant une durée |
 | ⏳ Édition limitée | Articles de la boutique tournante |
 
-Les cosmétiques achetés s'équipent avec **`/cosmetiques`** (un seul titre, une seule couleur et un seul fond équipés à la fois). Le premier objet d'une catégorie est équipé automatiquement.
+Les cosmétiques achetés s'équipent avec **`/boutique cosmetiques`** (un seul titre, une seule couleur et un seul fond équipés à la fois). Le premier objet d'une catégorie est équipé automatiquement.
 
 **Coffre mystère :** 🪙 pièces (40 à 100 % du prix) **55 %** • ✨ objet rare **28 %** • 💰 gros paquet de pièces (150 à 250 %) **14 %** • 🌟 objet légendaire **3 %**. En moyenne, les pièces rendent moins que le prix : c'est un pari.
 
-**Boutique tournante :** quelques articles tirés au sort dans une réserve, disponibles un temps limité (3 articles pendant 48 h, toutes les 168 h par défaut). Active-la avec `/boutiqueadmin rotation_config`.
+**Boutique tournante :** quelques articles tirés au sort dans une réserve, disponibles un temps limité (3 articles pendant 48 h, toutes les 168 h par défaut). Active-la avec `/boutiqueadmin rotation config`.
 
 ### Remplir la boutique (admin)
 
 | Commande | Description |
 | --- | --- |
 | `/boutiqueadmin gerer` | Panneau complet : ajouter, modifier prix / nom, retirer (boutique et réserve tournante) |
-| `/boutiqueadmin role\|titre\|couleur\|fond\|coffre\|bouclier\|boost` | Ajout rapide en une commande |
+| `/boutiqueadmin ajouter role\|titre\|couleur\|fond\|coffre\|bouclier\|boost` | Ajout rapide en une commande |
 | `/boutiqueadmin retirer_article` | Retire un article de la boutique |
-| `/boutiqueadmin rotation_config\|rotation_role\|rotation_boost\|rotation_liste\|rotation_retirer\|rotation_lancer` | Gère la boutique tournante |
+| `/boutiqueadmin rotation config\|role\|boost\|liste\|retirer\|lancer` | Gère la boutique tournante |
 
 > La boutique permanente est limitée à **25 articles** (limite d'un menu déroulant Discord).
 
@@ -295,7 +295,7 @@ Des événements surgissent au hasard dans le salon choisi : **pluie de pièces*
 
 ### Classement de la semaine
 
-`/semaine` affiche le classement de la semaine (XP, messages, vocal, victoires). Chaque **lundi**, le bot poste le podium dans le salon prévu et récompense les meilleurs.
+`/profil semaine` affiche le classement de la semaine (XP, messages, vocal, victoires). Chaque **lundi**, le bot poste le podium dans le salon prévu et récompense les meilleurs.
 
 | Commande | Description |
 | --- | --- |
@@ -316,6 +316,24 @@ Pour l'invitation du bot, utilise les scopes `bot` et `applications.commands`. D
 
 ## Commandes
 
+Pour garder la liste courte (Discord limite à 100 commandes), les commandes sont **regroupées** : tape `/` puis le nom du groupe, et Discord propose les sous-commandes.
+
+| Groupe | Contient |
+| --- | --- |
+| `/action` | bisou, câlin, headpat, gifle, bonk, cadeau (menu « type ») |
+| `/fun` | `roast`, `blague`, `8ball`, `choisir`, `ship` |
+| `/mariage` | `proposer`, `voir`, `divorcer` |
+| `/pfc` | `bot` (contre moi), `duel` (contre un membre, mise possible) |
+| `/quiz` | `rapide`, `perso …` (quiz des membres), `kahoot …` |
+| `/stat` | `classement`, `joueur` |
+| `/reglesjeux` | `blackjack`, `poker`, `mains` |
+| `/profil` | `voir`, `top`, `prestige`, `semaine`, `quetes`, `succes` |
+| `/argent` | `travail`, `crime`, `braquer`, `donner`, `richesse`, `banque …` |
+| `/boutique` | `voir`, `cosmetiques` |
+| `/bot` | `ping`, `lien`, `serveur` |
+
+Restent en commandes directes, car ce sont les plus utilisées : `/ask`, `/solde`, `/daily`, `/niveau`, `/blackjack`, `/poker`, `/jeux`, `/carte`, `/aide`.
+
 Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche tout ce que le bot sait faire, `/aideadmin` la partie réservée aux admins.
 
 ### 💬 IA et discussion
@@ -324,10 +342,10 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | --- | --- |
 | `/ask` | Pose une question (options : `detail`, `web`) |
 | `/recherche` | Recherche sur le web et donne des liens |
-| `/roast` | Chambre quelqu'un |
-| `/blague` | Blague coquine (sous-entendus, jamais explicite) |
-| `/8ball` | Réponse à une question fermée |
-| `/choisir` | Tranche entre plusieurs options |
+| `/fun roast` | Chambre quelqu'un |
+| `/fun blague` | Blague coquine (sous-entendus, jamais explicite) |
+| `/fun 8ball` | Réponse à une question fermée |
+| `/fun choisir` | Tranche entre plusieurs options |
 | `/meteo` | Météo d'une ville (aussi : « météo Lyon » dans le chat) |
 | `/reset` | Efface la mémoire du salon |
 
@@ -335,23 +353,23 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 
 | Commande | Description |
 | --- | --- |
-| `/kiss`, `/hug`, `/pat`, `/slap`, `/bonk`, `/gift` | Petites scènes avec ping (essaie sur Mika 😏) |
-| `/marie`, `/mariage`, `/divorce` | Mariage (jusqu'à 3 personnes) |
-| `/ship` | Compatibilité entre deux personnes |
-| `/statu` | Profil d'un membre : statut, stats de jeu, argent et niveau |
+| `/action type @membre` | Bisou, câlin, headpat, gifle, bonk ou cadeau : petite scène avec ping (essaie sur Mika 😏) |
+| `/mariage proposer`, `/mariage voir`, `/mariage divorcer` | Mariage (jusqu'à 3 personnes) |
+| `/fun ship` | Compatibilité entre deux personnes |
+| `/profil voir` | Profil d'un membre : statut, stats de jeu, argent et niveau |
 
 ### 🎮 Jeux
 
 | Commande | Description |
 | --- | --- |
 | `/jeux` | Panel regroupant tous les jeux |
-| `/pfc`, `/pfcduel` | Pierre-feuille-ciseaux (contre le bot ou en duel, mise possible) |
-| `/quiz` | Quiz rapide : le premier qui trouve gagne |
-| `/blackjack`, `/regleblackjack` | Blackjack, seul ou à plusieurs, et ses règles |
-| `/poker`, `/reglepoker`, `/main` | Texas Hold'em, ses règles, classement des mains |
-| `/classement`, `/stat` | Classement du serveur et stats individuelles (victoires, défaites, K/D) |
-| `/quizperso creer\|jouer\|liste\|supprimer` | Quiz créés par les membres |
-| `/kahoot creer\|generer\|lancer\|liste\|supprimer` | Kahoot (quiz live multi-joueurs), à la main ou par l'IA |
+| `/pfc bot`, `/pfc duel` | Pierre-feuille-ciseaux (contre le bot ou en duel, mise possible) |
+| `/quiz rapide` | Quiz rapide : le premier qui trouve gagne |
+| `/blackjack`, `/reglesjeux blackjack` | Blackjack, seul ou à plusieurs, et ses règles |
+| `/poker`, `/reglesjeux poker`, `/reglesjeux mains` | Texas Hold'em, ses règles, classement des mains |
+| `/stat classement`, `/stat joueur` | Classement du serveur et stats individuelles (victoires, défaites, K/D) |
+| `/quiz perso creer\|jouer\|liste\|supprimer` | Quiz créés par les membres |
+| `/quiz kahoot creer\|generer\|lancer\|liste\|supprimer` | Kahoot (quiz live multi-joueurs), à la main ou par l'IA |
 
 ### 🪙 Économie
 
@@ -359,16 +377,16 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | --- | --- |
 | `/solde` | Ton porte-monnaie |
 | `/daily` | Bonus quotidien (série + jackpot hebdo) |
-| `/travail` | Gagne des pièces en travaillant (délai entre deux) |
-| `/crime` | Plus risqué : gros gain ou amende 😈 |
-| `/donner` | Donne des pièces (petite taxe) |
-| `/richesse` | Les plus riches du serveur |
-| `/boutique` | Dépense tes pièces : rôles, boosts, cosmétiques, coffres, boucliers |
-| `/cosmetiques` | Équipe tes titres, couleurs et fonds de carte |
-| `/quetes` | Quêtes du jour et de la semaine |
-| `/succes [@membre]` | Succès et badges |
-| `/banque voir\|deposer\|retirer` | Compte en banque à intérêts |
-| `/braquer @membre` | Vole des pièces à un autre joueur 🥷 |
+| `/argent travail` | Gagne des pièces en travaillant (délai entre deux) |
+| `/argent crime` | Plus risqué : gros gain ou amende 😈 |
+| `/argent donner` | Donne des pièces (petite taxe) |
+| `/argent richesse` | Les plus riches du serveur |
+| `/boutique voir` | Dépense tes pièces : rôles, boosts, cosmétiques, coffres, boucliers |
+| `/boutique cosmetiques` | Équipe tes titres, couleurs et fonds de carte |
+| `/profil quetes` | Quêtes du jour et de la semaine |
+| `/profil succes [@membre]` | Succès et badges |
+| `/argent banque voir\|deposer\|retirer` | Compte en banque à intérêts |
+| `/argent braquer @membre` | Vole des pièces à un autre joueur 🥷 |
 
 ### 🪙 Économie (admin)
 
@@ -385,10 +403,10 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | Commande | Description |
 | --- | --- |
 | `/niveau [@membre]` | Niveau, barre de progression, rang, temps en vocal et prochain rôle à débloquer |
-| `/topniveaux [tri]` | Classement des membres, par XP (défaut) ou par temps passé en vocal |
-| `/prestige` | Remet ton niveau à zéro contre une ⭐ permanente et un bonus d'XP |
+| `/profil top [tri]` | Classement des membres, par XP (défaut) ou par temps passé en vocal |
+| `/profil prestige` | Remet ton niveau à zéro contre une ⭐ permanente et un bonus d'XP |
 | `/carte niveau\|profil [@membre]` | Ta carte en image |
-| `/semaine` | Le classement de la semaine |
+| `/profil semaine` | Le classement de la semaine |
 | `/xp config` *(admin)* | Active les niveaux, règle les gains d'XP et d'argent, l'anti-farm, le prestige et le salon d'annonces |
 | `/xp donner\|retirer\|reset\|evenement` *(admin)* | Ajuste l'XP d'un membre / lance un double XP |
 | `/recompense ajouter\|retirer\|liste\|appliquer` *(admin)* | Rôles offerts en atteignant un niveau |
@@ -461,9 +479,9 @@ Les commandes marquées *(admin)* ou *(staff)* sont réservées. `/aide` affiche
 | `/emoji agrandir\|ajouter` | Affiche un emoji en grand / l'ajoute au serveur *(admin)* |
 | `/dev projet\|question` | L'IA génère un site ou une app (zip) / répond à une question de dev |
 | `/optimiser` *(admin)* | Analyse les performances et propose des améliorations |
-| `/info` | Stats du serveur |
-| `/lien` | Lien du projet (GitHub) |
-| `/ping` | Latence du bot |
+| `/bot serveur` | Stats du serveur |
+| `/bot lien` | Lien du projet (GitHub) |
+| `/bot ping` | Latence du bot |
 | `/test` *(admin)* | Vérifie que tout fonctionne |
 | `/sync` *(owner)* | Resynchronise les commandes |
 
@@ -510,7 +528,7 @@ Les boutons de rôles, sondages, tickets, giveaways et règles restent actifs ap
 - **Pas d'annonce de passage de niveau** : le bot doit pouvoir envoyer des messages et intégrer des liens dans le salon d'annonces (ou le salon du membre), et il ne doit pas être en `/silence` ni dans un salon interdit.
 - **Un rôle-récompense n'est pas donné** : le rôle du bot doit être **au-dessus** de ce rôle avec « Gérer les rôles » (rôles de bot ou `@everyone` impossibles). Pour les membres qui avaient déjà le niveau avant l'ajout, lance `/recompense appliquer`.
 - **`/carte` répond qu'il faut Pillow** : `pip install pillow`, puis relance le bot.
-- **Le titre ou le fond n'apparaît pas sur la carte** : l'objet doit être **équipé** (✅ dans `/cosmetiques`). Un second objet de la même catégorie n'est pas équipé automatiquement. Un titre composé uniquement d'emojis ne peut pas être dessiné.
+- **Le titre ou le fond n'apparaît pas sur la carte** : l'objet doit être **équipé** (✅ dans `/boutique cosmetiques`). Un second objet de la même catégorie n'est pas équipé automatiquement. Un titre composé uniquement d'emojis ne peut pas être dessiné.
 - **La boutique est pleine** : elle est limitée à 25 articles ; retire-en avec `/boutiqueadmin gerer`.
 - **`/boutiqueadmin donner` refuse un fond ou une couleur** : le code `hexa` est obligatoire et doit être valide (`#FF69B4`).
 - **Un rôle de la boutique n'est pas donné** : le rôle du bot doit être au-dessus du rôle vendu, avec « Gérer les rôles ».
